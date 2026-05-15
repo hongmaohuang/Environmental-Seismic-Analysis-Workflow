@@ -1,0 +1,353 @@
+### WORKFLOW ###
+[workflow]
+
+active_stage = "dvv_calculation"
+# Choose workflow stage: dvv_calculation, pressure_modeling, synthetic_dvv_mapping, correlation_analysis.
+
+
+### PATHS ###
+[paths]
+
+output_dir = "outputs"
+# Root folder for files produced by this integration workflow.
+
+mcmc_dvv_repo = "/Users/hmhuang/pkgs/mcmc-dvv"
+# Local path to the mcmc-dvv repository by George Taylor (2019).
+
+dvv_observation_input = "outputs/dvv_calculation/mao2019_arrayB_pair_B11_B12/DTT/01/001_DAYS/ZZ"
+# Input table for the MCMC dv/v backend.
+# This can be a single CSV/TXT file or a directory of MSNoise DTT-style .txt files.
+
+output_subdir = "dvv_calculation/mcmc"
+# Subfolder under paths.output_dir for MCMC outputs.
+
+
+### MSNOISE DV/V CALCULATION ###
+[dvv_calculation.msnoise]
+
+method = "msnoise"
+# dv/v calculation method.
+# Choose "msnoise", "mcmc", or "both".
+
+run_commands = true
+# false means only list configured commands.
+# true means actually call the MSNoise commands below.
+
+dry_run = false
+# true means do not execute commands even when run_commands is true.
+# Use this to inspect the configured command sequence before a real run.
+
+project_dir = "outputs/dvv_calculation/mao2019_arrayB_pair_B11_B12"
+# Folder where the MSNoise project database and outputs live.
+
+prepare_project = true
+# true means this runner will download waveform data, initialize msnoise.sqlite,
+# scan SDS files, and write station/filter/config entries before MSNoise commands.
+# false means project_dir already contains a prepared MSNoise project.
+
+reset_project_dir = false
+# Only used when prepare_project is true.
+# true deletes project_dir before rebuilding it.
+
+clear_jobs_on_run = true
+# true clears existing MSNoise jobs before recreating them.
+# This makes reruns safe after changing the time range or reference window.
+
+skip_existing_downloads = true
+# true reuses existing hourly raw_mseed chunks instead of downloading them again.
+
+commands = [
+  ["msnoise", "new_jobs", "--init"],
+  ["msnoise", "reset", "--all", "CC"],
+  ["msnoise", "compute_cc"],
+  ["msnoise", "reset", "--all", "STACK"],
+  ["msnoise", "stack", "-r"],
+  ["msnoise", "reset", "STACK"],
+  ["msnoise", "stack", "-m"],
+  ["msnoise", "reset", "--all", "MWCS"],
+  ["msnoise", "compute_mwcs"],
+  ["msnoise", "reset", "--all", "DTT"],
+  ["msnoise", "compute_dtt"],
+]
+# Command sequence for a full MSNoise dv/v calculation.
+# You can shorten or reorder this list when restarting from an intermediate step.
+
+dataselect_url = "https://service.iris.edu/fdsnws/dataselect/1/query"
+# Explicit FDSN dataselect endpoint.
+# Only used when prepare_project is true.
+
+station_service_url = "https://service.iris.edu/fdsnws/station/1/query"
+# FDSN station endpoint used to fetch station coordinates when prepare_project is true.
+
+sds_folder = "SDS"
+# SDS folder inside project_dir.
+# Only used when prepare_project is true.
+
+data_structure = "SDS"
+# MSNoise data_structure config value.
+
+data_type = "D"
+# MSNoise data_type config value for daily SDS waveform files.
+
+msnoise_db_tech = "1"
+# MSNoise database backend passed to "msnoise db init --tech".
+
+station_coordinates = "DEG"
+# Coordinate type stored in the MSNoise stations table.
+
+station_instrument = "INST"
+# Instrument label stored in the MSNoise stations table.
+
+geographic_bounds = { minlatitude = -21.3000, maxlatitude = -21.1667, minlongitude = 55.5667, maxlongitude = 55.7667 }
+# User-facing station search area used when prepare_project is true.
+# The runner discovers matching stations from the FDSN station service.
+
+location = "00"
+# FDSN location code used when prepare_project is true.
+# Use "--" for blank FDSN location codes.
+
+channels = "BHZ"
+# Default FDSN channel selector used when prepare_project is true.
+
+start_date = "2014-07-03T00:00:00"
+# Waveform download start time used when prepare_project is true.
+
+end_date = "2014-07-20T00:00:00"
+# Waveform download end time used when prepare_project is true.
+
+download_chunk_hours = 1
+# Waveform download chunk length in hours.
+
+download_timeout = 120
+# Curl timeout in seconds for each waveform request.
+
+curl_retries = 5
+# Curl retry count for each waveform request.
+
+no_data_behavior = "skip"
+# Behavior when FDSN returns HTTP 204 for a requested waveform chunk.
+# Choose "skip" to print a warning and continue, or "fail" to stop immediately.
+
+msnoise_startdate = ""
+msnoise_enddate = ""
+# Optional MSNoise processing start/end dates.
+# Leave blank to derive them from start_date/end_date.
+
+ref_begin = "2014-07-04"
+ref_end = "2014-07-08"
+# Optional reference stack begin/end dates.
+# Leave blank to use the MSNoise processing date range.
+# Please note that MSNoise only except YYYY-MM-DD format for ref_begin/ref_end, so the time portion is ignored and the reference period always starts at 00:00:00.
+
+autocorr = "Y"
+# Required for single-station runs discovered from a small geographic area.
+
+components_to_compute = "ZZ"
+# Cross-station components to compute.
+
+components_to_compute_single_station = "ZZ"
+# Single-station components to compute.
+
+mov_stack = "1"
+# Moving stack length in days.
+
+analysis_duration = "3600"
+# MSNoise analysis duration in seconds.
+
+corr_duration = "3600"
+# Correlation window duration in seconds.
+
+cc_sampling_rate = "20.0"
+# MSNoise target sampling rate for cross-correlation.
+
+whitening = "A"
+# MSNoise spectral whitening mode.
+
+stack_method = "pws"
+# MSNoise stack method.
+
+dtt_lag = "dynamic"
+# DTT lag mode. Use "static" for a fixed coda window or "dynamic" for velocity-based lags.
+
+dtt_v = "1.5"
+# Apparent velocity used by dynamic DTT lag selection.
+
+dtt_width = "30.0"
+# DTT coda window width in seconds.
+
+dtt_sides = "both"
+# Coda side used for DTT regression.
+
+dtt_minlag = "5.0"
+# Minimum DTT coda lag in seconds.
+
+dtt_mincoh = "0.0"
+# Minimum MWCS coherence used in dt/t regression.
+
+dtt_maxerr = "1.0"
+# Maximum MWCS error used in dt/t regression.
+
+dtt_maxdt = "1.0"
+# Maximum dt value used in dt/t regression.
+
+validate_outputs = true
+# true means check expected MSNoise products after commands finish.
+
+require_ref = true
+# true means fail if REF stacks are missing.
+
+require_mwcs = true
+# true means fail if MWCS files are missing.
+
+require_dtt = true
+# true means fail if DTT files are missing.
+
+## MSNOISE FILTER CONFIGURATION ##
+[[dvv_calculation.msnoise.filters]]
+ref = 1
+# Filter 01.
+low = 0.1
+# Lower frequency for correlation filtering.
+mwcs_low = 0.1
+# Lower frequency for MWCS.
+high = 0.5
+# Upper frequency for correlation filtering.
+mwcs_high = 0.5
+# Upper frequency for MWCS.
+rms_threshold = 0.0
+# RMS threshold used by MSNoise filter config.
+mwcs_wlen = 15.0
+# MWCS moving window length in seconds.
+mwcs_step = 4.0
+# MWCS moving window step in seconds.
+
+[[dvv_calculation.msnoise.filters]]
+ref = 2
+# Filter 02.
+low = 0.5
+# Lower frequency for correlation filtering.
+mwcs_low = 0.5
+# Lower frequency for MWCS.
+high = 1.0
+# Upper frequency for correlation filtering.
+mwcs_high = 1.0
+# Upper frequency for MWCS.
+rms_threshold = 0.0
+# RMS threshold used by MSNoise filter config.
+mwcs_wlen = 10.0
+# MWCS moving window length in seconds.
+mwcs_step = 2.0
+# MWCS moving window step in seconds.
+
+[[dvv_calculation.msnoise.filters]]
+ref = 3
+# Filter 03.
+low = 1.0
+# Lower frequency for correlation filtering.
+mwcs_low = 1.0
+# Lower frequency for MWCS.
+high = 2.0
+# Upper frequency for correlation filtering.
+mwcs_high = 2.0
+# Upper frequency for MWCS.
+rms_threshold = 0.0
+# RMS threshold used by MSNoise filter config.
+mwcs_wlen = 8.0
+# MWCS moving window length in seconds.
+mwcs_step = 2.0
+# MWCS moving window step in seconds.
+
+[[dvv_calculation.msnoise.filters]]
+ref = 4
+# Filter 04.
+low = 2.0
+# Lower frequency for correlation filtering.
+mwcs_low = 2.0
+# Lower frequency for MWCS.
+high = 5.0
+# Upper frequency for correlation filtering.
+mwcs_high = 5.0
+# Upper frequency for MWCS.
+rms_threshold = 0.0
+# RMS threshold used by MSNoise filter config.
+mwcs_wlen = 6.0
+# MWCS moving window length in seconds.
+mwcs_step = 1.0
+# MWCS moving window step in seconds.
+
+[dvv_calculation.msnoise.extra_msnoise_config]
+# Optional raw MSNoise config overrides.
+# Add entries here only when a MSNoise key is not already exposed above.
+
+
+### MCMC DV/V CALCULATION ###
+[dvv_calculation.mcmc]
+
+iterations = 1000
+# Number of MCMC samples.
+# Must be positive and divisible by 100 because mcmc-dvv adapts proposal size every 100 iterations.
+
+burn_in = 200
+# Number of early samples discarded before summary statistics are written.
+
+proposal_std = 0.0005
+# Initial Gaussian proposal standard deviation.
+
+prior_low = -0.05
+# Lower uniform prior bound for each modeled dv/v value.
+
+prior_high = 0.05
+# Upper uniform prior bound for each modeled dv/v value.
+
+random_seed = 20260513
+# Fixed seed for reproducible parameter tests.
+
+date_column = "Date"
+# Date column name in paths.dvv_observation_input.
+
+observation_column = "M"
+# Observation column name in paths.dvv_observation_input.
+# For MSNoise DTT files, M is the dv/v-like slope.
+
+variance_column = ""
+# Optional variance column.
+# If set and valid, weight = 1 / variance.
+
+error_column = ""
+# Optional error column.
+# If variance_column is blank and error_column is valid, weight = 1 / error^2.
+# If both are blank or invalid, the runner uses uniform weights.
+
+pair_column = "Pairs"
+# Optional DTT pair column.
+# For MSNoise DTT files this is usually "Pairs".
+
+pair_selector = ""
+# Optional row selector for pair_column.
+# Leave empty to use every row in the DTT files.
+# Set to "ALL" to use only MSNoise's aggregate ALL row.
+# Set to a specific pair name to invert only that pair.
+
+weight_floor = 1e-12
+# Lower bound used to avoid division by zero in weight calculation.
+
+validate_outputs = true
+# true means validate the MCMC summary output after the backend finishes.
+
+min_summary_rows = 1
+# Minimum number of rows required in the MCMC summary output.
+
+
+[pressure_modeling]
+enabled = false
+# Placeholder for the next workflow stage.
+
+
+[synthetic_dvv_mapping]
+enabled = false
+# Placeholder for the pressure-to-dv/v mapping stage.
+
+
+[correlation_analysis]
+enabled = false
+# Placeholder for the observed-vs-modeled dv/v correlation stage.
