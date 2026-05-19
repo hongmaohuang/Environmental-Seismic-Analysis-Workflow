@@ -1,5 +1,6 @@
 # Environmental-Seismic-Analysis-Workflow
 Hong-Mao Huang, 2026
+</p>
 Department of Earth Science, University of Colorado Boulder, CO, USA
 
 
