@@ -8,7 +8,7 @@
 ### WORKFLOW ###
 [workflow]
 
-active_stage = "dvv_calculation, pressure_modeling"
+active_stage = "dvv_calculation"
 # Choose one or more workflow stages, separated by commas:
 # dvv_calculation, pressure_modeling, synthetic_dvv_mapping, correlation_analysis.
 
@@ -55,7 +55,7 @@ data_type = "D"
 # MSNoise data_type config value for daily SDS waveform files. D stands for "day".
 # It means each file contains one day of data in SDS
 
-geographic_bounds = { minlatitude = -22.4933, maxlatitude = -22.3377, minlongitude = 63.8023, maxlongitude = 63.8968}
+geographic_bounds = { minlatitude = 63.8023, maxlatitude = 63.8968, minlongitude = -22.4933, maxlongitude = -22.3377}
 # User-facing station search area used when prepare_project is true.
 # The runner discovers matching stations from the FDSN station service.
 
