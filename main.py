@@ -1,53 +1,54 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import sys
 from pathlib import Path
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parent
 DVV_RUNNER = ROOT / "src" / "01-dvv-calculation" / "runner.py"
+PRESSURE_RUNNER = ROOT / "src" / "02-pressure-modeling" / "runner.py"
 
 
-def load_dvv_runner():
-    spec = importlib.util.spec_from_file_location("dvv_calculation_runner", DVV_RUNNER)
+def load_runner(module_name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load dv/v runner from {DVV_RUNNER}")
+        raise ImportError(f"Cannot load runner from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
+def load_config(path: str | Path) -> dict:
+    config_path = Path(path).expanduser().resolve()
+
+    with config_path.open("rb") as handle:
+        cfg = tomllib.load(handle)
+    cfg["_config_path"] = str(config_path)
+    cfg["_config_dir"] = str(config_path.parent)
+    return cfg
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Integrated Iceland dv/v and pressure workflow.")
-    parser.add_argument("--config", default="config.toml", help="Path to workflow config.")
-    parser.add_argument(
-        "--stage",
-        default=None,
-        choices=["dvv_calculation"],
-        help="Workflow stage to run. Defaults to workflow.active_stage in config.",
-    )
-    parser.add_argument(
-        "--method",
-        default=None,
-        choices=["msnoise", "mcmc", "both"],
-        help="Override dvv_calculation.method from config.",
-    )
-    args = parser.parse_args()
+    cfg = load_config(ROOT / "config.toml")
+    stage = cfg.get("workflow", {}).get("active_stage", "dvv_calculation")
 
-    runner = load_dvv_runner()
-    cfg = runner.load_config(args.config)
-    stage = args.stage or cfg.get("workflow", {}).get("active_stage", "dvv_calculation")
+    if stage == "dvv_calculation":
+        runner = load_runner("dvv_calculation_runner", DVV_RUNNER)
+        result = runner.run_dvv_calculation(cfg, method_override=None)
+        runner.print_result(result)
+        return 0
 
-    if stage != "dvv_calculation":
-        raise ValueError(f"Unsupported stage for now: {stage}")
+    if stage == "pressure_modeling":
+        runner = load_runner("pressure_modeling_runner", PRESSURE_RUNNER)
+        result = runner.run_pressure_modeling(cfg)
+        runner.print_result(result)
+        return 0
 
-    result = runner.run_dvv_calculation(cfg, method_override=args.method)
-    runner.print_result(result)
-    return 0
+    raise ValueError(f"Unsupported stage: {stage}")
 
 
 if __name__ == "__main__":
