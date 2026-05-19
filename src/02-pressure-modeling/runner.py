@@ -13,6 +13,10 @@ except ModuleNotFoundError:
 
 
 MODEL_PATH = Path(__file__).resolve().with_name("model.py")
+OUTPUT_DIR = "outputs"
+OUTPUT_SUBDIR = "02-pressure-modeling"
+OUTPUT_FILENAME = "pore_pressure_output.csv"
+INCLUDE_SNOW_LOADING = True
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,15 @@ def _validate_input_file(path: Path, context: str) -> None:
         raise ValueError(f"{context} must be a file: {path}")
 
 
+def _pressure_time_window(cfg: dict) -> tuple[str, str]:
+    dvv_cfg = require_mapping(cfg, "dvv_calculation")
+    msnoise_cfg = require_mapping(dvv_cfg, "msnoise")
+    return (
+        str(require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise")),
+        str(require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise")),
+    )
+
+
 def _validate_output(cfg: dict, result: PressureModelingResult) -> dict[str, Any]:
     pressure_cfg = require_mapping(cfg, "pressure_modeling")
     if not require_bool(pressure_cfg, "validate_outputs", "pressure_modeling"):
@@ -138,7 +151,6 @@ def _validate_output(cfg: dict, result: PressureModelingResult) -> dict[str, Any
 
 def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
     pressure_cfg = require_mapping(cfg, "pressure_modeling")
-    paths_cfg = require_mapping(cfg, "paths")
 
     if not require_bool(pressure_cfg, "enabled", "pressure_modeling"):
         raise ValueError("pressure_modeling.enabled is false; set it to true before running this stage")
@@ -148,33 +160,30 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
         cfg, require_value(pressure_cfg, "atmospheric_pressure_csv_path", "pressure_modeling")
     )
     snow_path = _as_optional_path(cfg, require_configured(pressure_cfg, "snow_csv_path", "pressure_modeling"))
-    output_dir = resolve_path(cfg, require_value(paths_cfg, "output_dir", "paths"))
-    output_subdir = str(require_value(pressure_cfg, "output_subdir", "pressure_modeling"))
-    output_filename = str(require_value(pressure_cfg, "output_filename", "pressure_modeling"))
-    output_csv = output_dir / output_subdir / output_filename
+    output_dir = resolve_path(cfg, OUTPUT_DIR)
+    output_csv = output_dir / OUTPUT_SUBDIR / OUTPUT_FILENAME
 
     _validate_input_file(gwl_csv_path, "pressure_modeling.groundwater_csv_path")
     _validate_input_file(atmospheric_pressure_path, "pressure_modeling.atmospheric_pressure_csv_path")
-    include_snow = require_bool(pressure_cfg, "include_snow_loading", "pressure_modeling")
-    if include_snow:
-        if snow_path is None:
-            raise KeyError("pressure_modeling.snow_csv_path is required when include_snow_loading is true")
-        _validate_input_file(snow_path, "pressure_modeling.snow_csv_path")
+    if snow_path is None:
+        raise KeyError("pressure_modeling.snow_csv_path is required because snow loading is enabled")
+    _validate_input_file(snow_path, "pressure_modeling.snow_csv_path")
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     depths_m = tuple(float(depth) for depth in require_value(pressure_cfg, "depths_m", "pressure_modeling"))
     if not depths_m:
         raise ValueError("pressure_modeling.depths_m must contain at least one depth")
 
+    start_time, end_time = _pressure_time_window(cfg)
     model = _load_model_module()
     out = model.run_pore_pressure_workflow(
         gwl_csv_path=gwl_csv_path,
         atmospheric_pressure_csv_path=atmospheric_pressure_path,
         output_csv_path=output_csv,
         snow_csv_path=snow_path,
-        include_snow_loading=include_snow,
-        start=str(require_value(pressure_cfg, "start_time", "pressure_modeling")),
-        end=str(require_value(pressure_cfg, "end_time", "pressure_modeling")),
+        include_snow_loading=INCLUDE_SNOW_LOADING,
+        start=start_time,
+        end=end_time,
         resample_rule=str(require_value(pressure_cfg, "resample_rule", "pressure_modeling")),
         depths_m=depths_m,
         rho_w=float(require_value(pressure_cfg, "rho_w", "pressure_modeling")),

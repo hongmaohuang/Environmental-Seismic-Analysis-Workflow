@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-import csv
-import math
 import shutil
 import sqlite3
 import subprocess
-import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
-
-import numpy as np
 
 try:
     import tomllib
@@ -21,19 +15,20 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
-@dataclass(frozen=True)
-class ObservationSystem:
-    dates: list[str]
-    observations: np.ndarray
-    g: np.ndarray
-    weights: np.ndarray
+MSNOISE_PROJECT_DIR = "outputs/dvv_calculation/testing"
+DATASELECT_URL = "https://service.iris.edu/fdsnws/dataselect/1/query"
+STATION_SERVICE_URL = "https://service.iris.edu/fdsnws/station/1/query"
+SDS_FOLDER = "SDS"
+DATA_STRUCTURE = "SDS"
+MSNOISE_DB_TECH = "1"
+STATION_COORDINATES = "DEG"
+STATION_INSTRUMENT = "INST"
+LOCATION = "*"
 
 
 @dataclass(frozen=True)
 class DvvRunResult:
-    method: str
     msnoise_commands: list[list[str]]
-    mcmc_outputs: dict[str, Path]
     validation: dict[str, object]
 
 
@@ -80,45 +75,6 @@ def require_bool(mapping: dict, key: str, context: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{context}.{key} must be a boolean")
     return value
-
-
-def _first_present(row: dict[str, str], candidates: Iterable[str]) -> str | None:
-    normalized = {key.lower(): key for key in row}
-    for candidate in candidates:
-        if not candidate:
-            continue
-        key = normalized.get(candidate.lower())
-        if key is not None and row.get(key, "") != "":
-            return row[key]
-    return None
-
-
-def _as_float(value: str | None) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        result = float(value)
-    except ValueError:
-        return None
-    if not math.isfinite(result):
-        return None
-    return result
-
-
-def _parse_utc_date(value: str):
-    from obspy import UTCDateTime
-
-    return UTCDateTime(value)
-
-
-def _iter_days(start_date: str, end_date: str):
-    start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    current = start
-    while current < end:
-        next_day = min(current + timedelta(days=1), end)
-        yield current.strftime("%Y-%m-%d"), next_day.strftime("%Y-%m-%d")
-        current = next_day
 
 
 def _parse_time(value: str) -> datetime:
@@ -188,7 +144,6 @@ def load_station_metadata(msnoise_cfg: dict) -> list[dict[str, object]]:
             for row in manual_rows
         ]
 
-    station_service_url = str(require_value(msnoise_cfg, "station_service_url", "dvv_calculation.msnoise"))
     params = {
         "channel": require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"),
         "starttime": require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"),
@@ -199,7 +154,6 @@ def load_station_metadata(msnoise_cfg: dict) -> list[dict[str, object]]:
     }
     network = str(msnoise_cfg.get("network", "")).strip()
     stations = msnoise_cfg.get("stations") or []
-    location = str(msnoise_cfg.get("location", "")).strip()
     if network:
         params["network"] = network
     if stations:
@@ -208,9 +162,8 @@ def load_station_metadata(msnoise_cfg: dict) -> list[dict[str, object]]:
         bounds = require_mapping(msnoise_cfg, "geographic_bounds")
         for key in ("minlatitude", "maxlatitude", "minlongitude", "maxlongitude"):
             params[key] = require_value(bounds, key, "dvv_calculation.msnoise.geographic_bounds")
-    if location:
-        params["location"] = location
-    url = station_service_url + "?" + urllib.parse.urlencode(params)
+    params["location"] = LOCATION
+    url = STATION_SERVICE_URL + "?" + urllib.parse.urlencode(params)
     timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
     print(f"Querying station metadata: {url}", flush=True)
     payload = _fetch_text_url(url, timeout)
@@ -234,7 +187,7 @@ def load_station_metadata(msnoise_cfg: dict) -> list[dict[str, object]]:
 
     rows = list(rows_by_station.values())
     if not rows:
-        raise ValueError(f"No station metadata returned by {station_service_url}")
+        raise ValueError(f"No station metadata returned by {STATION_SERVICE_URL}")
     return rows
 
 
@@ -280,8 +233,6 @@ def _write_sds_trace(trace, sds_root: Path) -> Path:
 def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
     import obspy
 
-    dataselect_url = str(require_value(msnoise_cfg, "dataselect_url", "dvv_calculation.msnoise"))
-    location = str(require_value(msnoise_cfg, "location", "dvv_calculation.msnoise"))
     channels = str(require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"))
     start_date = str(require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"))
     end_date = str(require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"))
@@ -294,7 +245,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
         raise ValueError('dvv_calculation.msnoise.no_data_behavior must be "skip" or "fail"')
     if chunk_hours <= 0:
         raise ValueError("dvv_calculation.msnoise.download_chunk_hours must be positive")
-    sds_root = project_dir / str(require_value(msnoise_cfg, "sds_folder", "dvv_calculation.msnoise"))
+    sds_root = project_dir / SDS_FOLDER
     raw_root = project_dir / "raw_mseed"
     sds_root.mkdir(parents=True, exist_ok=True)
     raw_root.mkdir(parents=True, exist_ok=True)
@@ -311,11 +262,11 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 print(f"Using existing {network}.{station} {chunk_start} to {chunk_end}", flush=True)
                 downloaded_by_station[f"{network}.{station}"] += 1
                 continue
-            query = dataselect_url + "?" + urllib.parse.urlencode(
+            query = DATASELECT_URL + "?" + urllib.parse.urlencode(
                 {
                     "network": network,
                     "station": station,
-                    "location": location,
+                    "location": LOCATION,
                     "channel": channels,
                     "starttime": chunk_start,
                     "endtime": chunk_end,
@@ -455,7 +406,7 @@ def sync_msnoise_project_config(msnoise_cfg: dict, project_dir: Path) -> None:
     cursor = conn.cursor()
     try:
         _set_msnoise_config(cursor, "data_folder", str(project_dir))
-        _set_msnoise_config(cursor, "data_structure", require_value(msnoise_cfg, "data_structure", "dvv_calculation.msnoise"))
+        _set_msnoise_config(cursor, "data_structure", DATA_STRUCTURE)
         _set_msnoise_config(cursor, "data_type", require_value(msnoise_cfg, "data_type", "dvv_calculation.msnoise"))
         _write_msnoise_processing_config(cursor, msnoise_cfg)
         conn.commit()
@@ -488,20 +439,18 @@ def _scan_msnoise_project(msnoise_cfg: dict, project_dir: Path, sds_root: Path, 
     cursor = conn.cursor()
     try:
         _set_msnoise_config(cursor, "data_folder", str(project_dir))
-        _set_msnoise_config(cursor, "data_structure", require_value(msnoise_cfg, "data_structure", "dvv_calculation.msnoise"))
+        _set_msnoise_config(cursor, "data_structure", DATA_STRUCTURE)
         _set_msnoise_config(cursor, "data_type", require_value(msnoise_cfg, "data_type", "dvv_calculation.msnoise"))
         _write_msnoise_processing_config(cursor, msnoise_cfg)
 
         cursor.execute("DELETE FROM stations")
-        station_coordinates = str(require_value(msnoise_cfg, "station_coordinates", "dvv_calculation.msnoise"))
-        station_instrument = str(require_value(msnoise_cfg, "station_instrument", "dvv_calculation.msnoise"))
         for row in station_rows:
             cursor.execute(
                 """
                 INSERT INTO stations (net, sta, X, Y, altitude, coordinates, instrument, used)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (row["net"], row["sta"], row["lon"], row["lat"], row["elev"], station_coordinates, station_instrument),
+                (row["net"], row["sta"], row["lon"], row["lat"], row["elev"], STATION_COORDINATES, STATION_INSTRUMENT),
             )
 
         cursor.execute("DELETE FROM data_availability")
@@ -545,9 +494,8 @@ def run_msnoise_project_setup(msnoise_cfg: dict, project_dir: Path) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
 
     sds_root, station_rows = _download_msnoise_sds(msnoise_cfg, project_dir)
-    db_tech = str(require_value(msnoise_cfg, "msnoise_db_tech", "dvv_calculation.msnoise"))
     if not (project_dir / "msnoise.sqlite").exists():
-        subprocess.run(["msnoise", "db", "init", "--tech", db_tech], cwd=project_dir, check=True)
+        subprocess.run(["msnoise", "db", "init", "--tech", MSNOISE_DB_TECH], cwd=project_dir, check=True)
     _scan_msnoise_project(msnoise_cfg, project_dir, sds_root, station_rows)
 
 
@@ -557,8 +505,6 @@ def validate_msnoise_outputs(cfg: dict, project_dir: Path) -> dict[str, object]:
     if not isinstance(msnoise_cfg, dict) or not require_bool(msnoise_cfg, "validate_outputs", "dvv_calculation.msnoise"):
         return {}
     if not require_bool(msnoise_cfg, "run_commands", "dvv_calculation.msnoise"):
-        return {}
-    if require_bool(msnoise_cfg, "dry_run", "dvv_calculation.msnoise"):
         return {}
 
     ref_files = sorted((project_dir / "STACKS").glob("*/REF/*/*"))
@@ -600,222 +546,6 @@ def validate_msnoise_outputs(cfg: dict, project_dir: Path) -> dict[str, object]:
     return validation
 
 
-def validate_mcmc_outputs(cfg: dict, outputs: dict[str, Path]) -> dict[str, object]:
-    dvv_cfg = require_mapping(cfg, "dvv_calculation")
-    mcmc_cfg = dvv_cfg.get("mcmc")
-    if not isinstance(mcmc_cfg, dict) or not require_bool(mcmc_cfg, "validate_outputs", "dvv_calculation.mcmc"):
-        return {}
-
-    summary_path = outputs.get("summary")
-    likelihood_path = outputs.get("likelihood")
-    if summary_path is None or not summary_path.exists():
-        raise FileNotFoundError(f"MCMC summary output is missing: {summary_path}")
-    if likelihood_path is None or not likelihood_path.exists():
-        raise FileNotFoundError(f"MCMC likelihood output is missing: {likelihood_path}")
-
-    rows: list[dict[str, str]]
-    with summary_path.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-
-    min_rows = int(require_value(mcmc_cfg, "min_summary_rows", "dvv_calculation.mcmc"))
-    if len(rows) < min_rows:
-        raise RuntimeError(f"MCMC summary has {len(rows)} rows; expected at least {min_rows}: {summary_path}")
-
-    numeric_columns = ["mean", "median", "p025", "p975"]
-    bad_rows: list[str] = []
-    for row in rows:
-        for column in numeric_columns:
-            value = _as_float(row.get(column))
-            if value is None:
-                bad_rows.append(row.get("date", "<unknown-date>"))
-                break
-
-    if bad_rows:
-        raise RuntimeError(
-            "MCMC summary contains non-finite values for dates: "
-            + ", ".join(bad_rows[:10])
-            + f". Summary path: {summary_path}"
-        )
-
-    return {
-        "mcmc_summary_rows": len(rows),
-        "mcmc_first_date": rows[0].get("date") if rows else None,
-        "mcmc_last_date": rows[-1].get("date") if rows else None,
-        "mcmc_summary": summary_path,
-        "mcmc_likelihood": likelihood_path,
-    }
-
-
-def _read_table_rows(path: Path) -> list[dict[str, str]]:
-    input_files = sorted(path.glob("*.txt")) if path.is_dir() else [path]
-    rows: list[dict[str, str]] = []
-
-    for file_path in input_files:
-        if not file_path.exists():
-            raise FileNotFoundError(file_path)
-        with file_path.open("r", encoding="utf-8", newline="") as handle:
-            sample = handle.read(4096)
-            handle.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t ;")
-            reader = csv.DictReader(handle, dialect=dialect)
-            for row in reader:
-                row["_source_file"] = str(file_path)
-                rows.append(row)
-
-    return rows
-
-
-def build_observation_system(cfg: dict) -> ObservationSystem:
-    paths = require_mapping(cfg, "paths")
-    dvv_cfg = require_mapping(cfg, "dvv_calculation")
-    mcmc_cfg = dvv_cfg.get("mcmc")
-    if not isinstance(mcmc_cfg, dict):
-        raise KeyError("Missing required config object: dvv_calculation.mcmc")
-
-    input_path = resolve_path(cfg, require_value(paths, "dvv_observation_input", "paths"))
-
-    date_column = str(require_value(mcmc_cfg, "date_column", "dvv_calculation.mcmc"))
-    observation_column = str(require_value(mcmc_cfg, "observation_column", "dvv_calculation.mcmc"))
-    variance_column = str(require_configured(mcmc_cfg, "variance_column", "dvv_calculation.mcmc"))
-    error_column = str(require_configured(mcmc_cfg, "error_column", "dvv_calculation.mcmc"))
-    pair_column = str(require_configured(mcmc_cfg, "pair_column", "dvv_calculation.mcmc"))
-    pair_selector = str(require_configured(mcmc_cfg, "pair_selector", "dvv_calculation.mcmc"))
-    weight_floor = float(require_value(mcmc_cfg, "weight_floor", "dvv_calculation.mcmc"))
-
-    rows = _read_table_rows(input_path)
-    if not rows:
-        raise ValueError(f"No observations found in {input_path}")
-
-    date_values: list[str] = []
-    obs_values: list[float] = []
-    raw_weights: list[float] = []
-
-    for row in rows:
-        if pair_selector:
-            row_pair = _first_present(row, [pair_column, "Pairs", "pair", "station_pair"])
-            if row_pair != pair_selector:
-                continue
-
-        date_value = _first_present(row, [date_column, "Date", "date", "day", "startdate", "enddate", "time"])
-        obs_value = _as_float(_first_present(row, [observation_column, "M", "dvv", "dt_over_t", "dtt", "dt"]))
-        variance_value = _as_float(_first_present(row, [variance_column, "variance", "var"]))
-        error_value = _as_float(_first_present(row, [error_column, "EM", "error", "err", "sigma", "std"]))
-        corr_value = _as_float(_first_present(row, ["corr", "coh", "coherence", "cc"]))
-
-        if date_value is None or obs_value is None:
-            continue
-
-        if variance_value is not None and variance_value > 0:
-            weight = 1.0 / max(variance_value, weight_floor)
-        elif error_value is not None and error_value > 0:
-            weight = 1.0 / max(error_value * error_value, weight_floor)
-        elif corr_value is not None and corr_value > 0:
-            weight = max(corr_value, weight_floor)
-        else:
-            weight = 1.0
-
-        date_values.append(date_value[:10])
-        obs_values.append(obs_value)
-        raw_weights.append(weight)
-
-    if not obs_values:
-        raise ValueError(f"No usable observations found in {input_path}")
-
-    dates = sorted(set(date_values))
-    date_index = {date: idx for idx, date in enumerate(dates)}
-    g = np.zeros((len(obs_values), len(dates)), dtype=float)
-    for row_idx, date_value in enumerate(date_values):
-        g[row_idx, date_index[date_value]] = 1.0
-
-    return ObservationSystem(
-        dates=dates,
-        observations=np.asarray(obs_values, dtype=float),
-        g=g,
-        weights=np.asarray(raw_weights, dtype=float),
-    )
-
-
-def import_mcmc_class(cfg: dict):
-    paths = require_mapping(cfg, "paths")
-    repo_path = resolve_path(cfg, require_value(paths, "mcmc_dvv_repo", "paths"))
-    sys.path.insert(0, str(repo_path))
-    try:
-        from mcmc_inversion import MarkovChainMonteCarlo
-    finally:
-        try:
-            sys.path.remove(str(repo_path))
-        except ValueError:
-            pass
-    return MarkovChainMonteCarlo
-
-
-def run_mcmc_backend(cfg: dict) -> dict[str, Path]:
-    paths = require_mapping(cfg, "paths")
-    dvv_cfg = require_mapping(cfg, "dvv_calculation")
-    mcmc_cfg = dvv_cfg.get("mcmc")
-    if not isinstance(mcmc_cfg, dict):
-        raise KeyError("Missing required config object: dvv_calculation.mcmc")
-
-    random_seed = require_value(mcmc_cfg, "random_seed", "dvv_calculation.mcmc")
-    if random_seed is not None:
-        np.random.seed(int(random_seed))
-
-    system = build_observation_system(cfg)
-    iterations = int(require_value(mcmc_cfg, "iterations", "dvv_calculation.mcmc"))
-    if iterations <= 0 or iterations % 100 != 0:
-        raise ValueError("dvv_calculation.mcmc.iterations must be positive and divisible by 100")
-
-    burn_in = int(require_value(mcmc_cfg, "burn_in", "dvv_calculation.mcmc"))
-    if burn_in < 0 or burn_in >= iterations:
-        raise ValueError("dvv_calculation.mcmc.burn_in must be >= 0 and smaller than iterations")
-
-    mcmc_class = import_mcmc_class(cfg)
-    inversion = mcmc_class(
-        system.observations,
-        system.g,
-        system.weights,
-        len(system.dates),
-        float(require_value(mcmc_cfg, "prior_low", "dvv_calculation.mcmc")),
-        float(require_value(mcmc_cfg, "prior_high", "dvv_calculation.mcmc")),
-    )
-    proposal_std = float(require_value(mcmc_cfg, "proposal_std", "dvv_calculation.mcmc"))
-    distribution, likelihood = inversion.do_mcmc(iterations, proposal_std)
-    posterior = distribution[:, burn_in:]
-
-    output_dir = (
-        resolve_path(cfg, require_value(paths, "output_dir", "paths"))
-        / str(require_value(paths, "output_subdir", "paths"))
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = output_dir / "dvv_mcmc_summary.csv"
-    likelihood_path = output_dir / "likelihood.csv"
-
-    with summary_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["date", "mean", "median", "p025", "p975", "n_observations"])
-        counts = np.sum(system.g, axis=0).astype(int)
-        for idx, date_value in enumerate(system.dates):
-            samples = posterior[idx, :]
-            writer.writerow(
-                [
-                    date_value,
-                    f"{np.mean(samples):.10g}",
-                    f"{np.median(samples):.10g}",
-                    f"{np.percentile(samples, 2.5):.10g}",
-                    f"{np.percentile(samples, 97.5):.10g}",
-                    int(counts[idx]),
-                ]
-            )
-
-    with likelihood_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["iteration", "likelihood"])
-        for idx, value in enumerate(likelihood):
-            writer.writerow([idx, f"{value:.10g}"])
-
-    return {"summary": summary_path, "likelihood": likelihood_path}
-
-
 def run_msnoise_backend(cfg: dict) -> list[list[str]]:
     dvv_cfg = require_mapping(cfg, "dvv_calculation")
     msnoise_cfg = dvv_cfg.get("msnoise")
@@ -828,9 +558,7 @@ def run_msnoise_backend(cfg: dict) -> list[list[str]]:
     if not require_bool(msnoise_cfg, "run_commands", "dvv_calculation.msnoise"):
         return normalized_commands
 
-    project_dir = resolve_path(cfg, require_value(msnoise_cfg, "project_dir", "dvv_calculation.msnoise"))
-    if require_bool(msnoise_cfg, "dry_run", "dvv_calculation.msnoise"):
-        return normalized_commands
+    project_dir = resolve_path(cfg, MSNOISE_PROJECT_DIR)
 
     run_msnoise_project_setup(msnoise_cfg, project_dir)
     sync_msnoise_project_config(msnoise_cfg, project_dir)
@@ -843,47 +571,25 @@ def run_msnoise_backend(cfg: dict) -> list[list[str]]:
     return normalized_commands
 
 
-def run_dvv_calculation(cfg: dict, method_override: str | None = None) -> DvvRunResult:
+def run_dvv_calculation(cfg: dict) -> DvvRunResult:
     dvv_cfg = require_mapping(cfg, "dvv_calculation")
     msnoise_cfg = dvv_cfg.get("msnoise")
     if not isinstance(msnoise_cfg, dict):
         raise KeyError("Missing required config object: dvv_calculation.msnoise")
-    method = method_override or str(require_value(msnoise_cfg, "method", "dvv_calculation.msnoise"))
-    allowed = {"msnoise", "mcmc", "both"}
-    if method not in allowed:
-        raise ValueError(f"Unsupported dv/v method: {method}")
 
-    msnoise_commands: list[list[str]] = []
-    mcmc_outputs: dict[str, Path] = {}
-    validation: dict[str, object] = {}
+    msnoise_commands = run_msnoise_backend(cfg)
+    project_dir = resolve_path(cfg, MSNOISE_PROJECT_DIR)
+    validation = validate_msnoise_outputs(cfg, project_dir)
 
-    if method in {"msnoise", "both"}:
-        msnoise_commands = run_msnoise_backend(cfg)
-        msnoise_cfg = require_mapping(dvv_cfg, "msnoise")
-        project_dir = resolve_path(cfg, require_value(msnoise_cfg, "project_dir", "dvv_calculation.msnoise"))
-        validation.update(validate_msnoise_outputs(cfg, project_dir))
-
-    if method in {"mcmc", "both"}:
-        mcmc_outputs = run_mcmc_backend(cfg)
-        validation.update(validate_mcmc_outputs(cfg, mcmc_outputs))
-
-    return DvvRunResult(
-        method=method,
-        msnoise_commands=msnoise_commands,
-        mcmc_outputs=mcmc_outputs,
-        validation=validation,
-    )
+    return DvvRunResult(msnoise_commands=msnoise_commands, validation=validation)
 
 
 def print_result(result: DvvRunResult) -> None:
-    print(f"dv/v method: {result.method}")
+    print("dv/v method: msnoise")
     if result.msnoise_commands:
         print("MSNoise commands configured:")
         for command in result.msnoise_commands:
             print("  " + " ".join(command))
-    if result.mcmc_outputs:
-        print(f"MCMC summary: {result.mcmc_outputs['summary']}")
-        print(f"MCMC likelihood: {result.mcmc_outputs['likelihood']}")
     if result.validation:
         print("Validation:")
         if result.validation.get("ref_files") is not None:
@@ -898,6 +604,3 @@ def print_result(result: DvvRunResult) -> None:
             print("  Job summary:")
             for row in result.validation["job_summary"]:
                 print(f"    {row}")
-        if result.validation.get("mcmc_summary_rows") is not None:
-            print(f"  MCMC summary rows: {result.validation['mcmc_summary_rows']}")
-            print(f"  MCMC date range: {result.validation['mcmc_first_date']} to {result.validation['mcmc_last_date']}")

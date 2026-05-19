@@ -34,21 +34,27 @@ def load_config(path: str | Path) -> dict:
 
 def main() -> int:
     cfg = load_config(ROOT / "config.toml")
-    stage = cfg.get("workflow", {}).get("active_stage", "dvv_calculation")
+    raw_stage = str(cfg.get("workflow", {}).get("active_stage", "dvv_calculation"))
+    stages = [stage.strip() for stage in raw_stage.split(",") if stage.strip()]
+    if not stages:
+        raise ValueError("workflow.active_stage must include at least one stage")
 
-    if stage == "dvv_calculation":
-        runner = load_runner("dvv_calculation_runner", DVV_RUNNER)
-        result = runner.run_dvv_calculation(cfg, method_override=None)
-        runner.print_result(result)
-        return 0
+    for stage in stages:
+        if stage == "dvv_calculation":
+            runner = load_runner("dvv_calculation_runner", DVV_RUNNER)
+            result = runner.run_dvv_calculation(cfg)
+            runner.print_result(result)
+            continue
 
-    if stage == "pressure_modeling":
-        runner = load_runner("pressure_modeling_runner", PRESSURE_RUNNER)
-        result = runner.run_pressure_modeling(cfg)
-        runner.print_result(result)
-        return 0
+        if stage == "pressure_modeling":
+            runner = load_runner("pressure_modeling_runner", PRESSURE_RUNNER)
+            result = runner.run_pressure_modeling(cfg)
+            runner.print_result(result)
+            continue
 
-    raise ValueError(f"Unsupported stage: {stage}")
+        raise ValueError(f"Unsupported stage: {stage}")
+
+    return 0
 
 
 if __name__ == "__main__":
