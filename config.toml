@@ -184,7 +184,7 @@ require_mwcs = true
 require_dtt = true
 # true means fail if DTT files are missing.
 
-## MSNOISE FILTER CONFIGURATION ##
+### MSNOISE FILTER CONFIGURATION ###
 [[dvv_calculation.msnoise.filters]]
 ref = 1
 # Filter 01.
@@ -206,6 +206,8 @@ mwcs_step = 4.0
 [dvv_calculation.msnoise.extra_msnoise_config]
 # Optional raw MSNoise config overrides.
 # Add entries here only when a MSNoise key is not already exposed in this configure file.
+
+### PRESSURE MODELING CONFIGURATION ###
 
 [pressure_modeling]
 enabled = true
