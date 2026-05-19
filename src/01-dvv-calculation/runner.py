@@ -172,6 +172,19 @@ def _iter_time_chunks(start_time: str, end_time: str, chunk_hours: int):
         current = next_time
 
 
+def _target_overlaps_chunk(target: ChannelTarget, chunk_start: str, chunk_end: str) -> bool:
+    chunk_start_time = _parse_time(chunk_start)
+    chunk_end_time = _parse_time(chunk_end)
+    target_start = _parse_time(target.starttime)
+    if chunk_end_time <= target_start:
+        return False
+    if target.endtime:
+        target_end = _parse_time(target.endtime)
+        if chunk_start_time >= target_end:
+            return False
+    return True
+
+
 def _fetch_text_url(url: str, timeout: int) -> str:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -473,10 +486,14 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     channel_targets = discover_channel_targets(msnoise_cfg)
     downloaded_by_channel = {target.seed_id: 0 for target in channel_targets}
     no_data_by_channel = {target.seed_id: 0 for target in channel_targets}
+    outside_availability_by_channel = {target.seed_id: 0 for target in channel_targets}
     downloaded_stations: dict[tuple[str, str], dict[str, object]] = {}
 
     for target in channel_targets:
         for chunk_start, chunk_end in _iter_time_chunks(start_date, end_date, chunk_hours):
+            if not _target_overlaps_chunk(target, chunk_start, chunk_end):
+                outside_availability_by_channel[target.seed_id] += 1
+                continue
             timestamp = chunk_start.replace(":", "").replace("-", "")
             raw_path = raw_root / f"{target.seed_id}.{timestamp}.mseed"
             part_path = raw_path.with_suffix(raw_path.suffix + ".part")
@@ -569,8 +586,13 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     for seed_id in sorted(downloaded_by_channel):
         downloads = downloaded_by_channel[seed_id]
         no_data = no_data_by_channel[seed_id]
-        if downloads or no_data:
-            print(f"  {seed_id}: downloaded={downloads}, no_data={no_data}", flush=True)
+        outside_availability = outside_availability_by_channel[seed_id]
+        if downloads or no_data or outside_availability:
+            print(
+                f"  {seed_id}: downloaded={downloads}, "
+                f"no_data={no_data}, outside_availability={outside_availability}",
+                flush=True,
+            )
     skipped_channels = [seed_id for seed_id, count in downloaded_by_channel.items() if count == 0]
     if skipped_channels:
         print("Channels skipped because no waveform chunks were downloaded:", flush=True)
