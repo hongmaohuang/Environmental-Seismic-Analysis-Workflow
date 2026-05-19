@@ -23,7 +23,6 @@ prepare_project = true
 # true means this runner will download waveform data, initialize msnoise.sqlite,
 # scan SDS files, and write station/filter/config entries before MSNoise commands.
 # false means the fixed MSNoise project folder already contains a prepared project.
-
 reset_project_dir = true
 # Only used when prepare_project is true.
 # true deletes the fixed MSNoise project folder before rebuilding it.
@@ -63,6 +62,14 @@ channels = "*Z"
 # Default FDSN channel selector used when prepare_project is true.
 # You can use "BHZ,HHZ", "BH?,HH?", "*Z" or similar to specify multiple channels.
 # If you are using DAS datasets, you should look up the channel code.
+
+max_channels = 0
+# Optional limit after automatic provider/routing discovery.
+# 0 means no limit.
+
+min_sample_rate = 0
+# Optional channel sample-rate filter in Hz after discovery.
+# 0 means no filter.
 
 
 start_date = "2021-03-01T00:00:00"

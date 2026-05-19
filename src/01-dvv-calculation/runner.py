@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 
 try:
     import tomllib
@@ -16,14 +17,64 @@ except ModuleNotFoundError:
 
 
 MSNOISE_PROJECT_DIR = "outputs/dvv_calculation/testing"
-DATASELECT_URL = "https://service.iris.edu/fdsnws/dataselect/1/query"
-STATION_SERVICE_URL = "https://service.iris.edu/fdsnws/station/1/query"
 SDS_FOLDER = "SDS"
 DATA_STRUCTURE = "SDS"
 MSNOISE_DB_TECH = "1"
 STATION_COORDINATES = "DEG"
 STATION_INSTRUMENT = "INST"
 LOCATION = "*"
+ROUTING_SERVICE_URLS = (
+    "https://www.orfeus-eu.org/eidaws/routing/1/query",
+    "https://service.iris.edu/irisws/fedcatalog/1/query",
+)
+
+
+@dataclass(frozen=True)
+class FdsnProvider:
+    name: str
+    station_url: str
+    dataselect_url: str
+
+
+FDSN_PROVIDERS = (
+    FdsnProvider(
+        "earthscope",
+        "https://service.iris.edu/fdsnws/station/1/query",
+        "https://service.earthscope.org/fdsnws/dataselect/1/query",
+    ),
+    FdsnProvider(
+        "gfz",
+        "https://geofon.gfz-potsdam.de/fdsnws/station/1/query",
+        "https://geofon.gfz-potsdam.de/fdsnws/dataselect/1/query",
+    ),
+    FdsnProvider(
+        "noa",
+        "https://eida.gein.noa.gr/fdsnws/station/1/query",
+        "https://eida.gein.noa.gr/fdsnws/dataselect/1/query",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ChannelTarget:
+    provider: str
+    station_url: str
+    dataselect_url: str
+    network: str
+    station: str
+    location: str
+    channel: str
+    latitude: float
+    longitude: float
+    elevation: float
+    sample_rate: float
+    starttime: str
+    endtime: str
+
+    @property
+    def seed_id(self) -> str:
+        location = self.location or "--"
+        return f"{self.network}.{self.station}.{location}.{self.channel}"
 
 
 @dataclass(frozen=True)
@@ -78,9 +129,19 @@ def require_bool(mapping: dict, key: str, context: str) -> bool:
 
 
 def _parse_time(value: str) -> datetime:
+    clean_value = value.strip()
+    if clean_value.endswith("Z"):
+        clean_value = clean_value[:-1]
+    if "." in clean_value:
+        prefix, fraction = clean_value.split(".", 1)
+        clean_value = prefix + "." + fraction[:6].ljust(6, "0")
+    try:
+        return datetime.fromisoformat(clean_value).replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(clean_value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             pass
     raise ValueError(f"Unsupported time format: {value}")
@@ -115,6 +176,10 @@ def _fetch_text_url(url: str, timeout: int) -> str:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return response.read().decode("utf-8")
+    except HTTPError as http_error:
+        if http_error.code in {204, 404}:
+            return ""
+        raise
     except Exception as urlopen_error:
         result = subprocess.run(
             ["curl", "-L", "-sS", "-f", "--max-time", str(timeout), url],
@@ -130,65 +195,221 @@ def _fetch_text_url(url: str, timeout: int) -> str:
         return result.stdout
 
 
-def load_station_metadata(msnoise_cfg: dict) -> list[dict[str, object]]:
-    manual_rows = msnoise_cfg.get("station_metadata")
-    if manual_rows:
-        return [
-            {
-                "net": row["network"],
-                "sta": row["station"],
-                "lon": float(row["longitude"]),
-                "lat": float(row["latitude"]),
-                "elev": float(row["elevation"]),
-            }
-            for row in manual_rows
-        ]
+def _query_url(base_url: str, params: dict[str, object]) -> str:
+    return base_url + "?" + urllib.parse.urlencode(params)
 
-    params = {
-        "channel": require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"),
-        "starttime": require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"),
-        "endtime": require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"),
-        "level": "station",
-        "format": "text",
-        "nodata": "404",
-    }
-    network = str(msnoise_cfg.get("network", "")).strip()
-    stations = msnoise_cfg.get("stations") or []
-    if network:
-        params["network"] = network
-    if stations:
-        params["station"] = ",".join(str(station) for station in stations)
-    else:
-        bounds = require_mapping(msnoise_cfg, "geographic_bounds")
-        for key in ("minlatitude", "maxlatitude", "minlongitude", "maxlongitude"):
-            params[key] = require_value(bounds, key, "dvv_calculation.msnoise.geographic_bounds")
-    params["location"] = LOCATION
-    url = STATION_SERVICE_URL + "?" + urllib.parse.urlencode(params)
-    timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
-    print(f"Querying station metadata: {url}", flush=True)
-    payload = _fetch_text_url(url, timeout)
 
-    rows_by_station: dict[tuple[str, str], dict[str, object]] = {}
+def _as_dataselect_location(location: str) -> str:
+    return location if location else "--"
+
+
+def _canonical_dataselect_url(url: str) -> str:
+    return url.rstrip("/") + "/query" if not url.rstrip("/").endswith("/query") else url.rstrip("/")
+
+
+def _station_url_from_dataselect(dataselect_url: str) -> str:
+    return _canonical_dataselect_url(dataselect_url).replace("/dataselect/1/query", "/station/1/query")
+
+
+def _target_key(target: ChannelTarget) -> tuple[str, str, str, str]:
+    return (
+        target.network,
+        target.station,
+        target.location,
+        target.channel,
+    )
+
+
+def _parse_channel_text(
+    payload: str,
+    provider: str,
+    station_url: str,
+    dataselect_url: str,
+) -> list[ChannelTarget]:
+    targets: list[ChannelTarget] = []
     for raw_line in payload.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) < 5:
+        if len(parts) < 17:
             continue
-        key = (parts[0], parts[1])
-        rows_by_station[key] = {
-            "net": parts[0],
-            "sta": parts[1],
-            "lat": float(parts[2]),
-            "lon": float(parts[3]),
-            "elev": float(parts[4]),
-        }
+        try:
+            target = ChannelTarget(
+                provider=provider,
+                station_url=station_url,
+                dataselect_url=dataselect_url,
+                network=parts[0],
+                station=parts[1],
+                location=parts[2],
+                channel=parts[3],
+                latitude=float(parts[4]),
+                longitude=float(parts[5]),
+                elevation=float(parts[6]),
+                sample_rate=float(parts[14]),
+                starttime=parts[15],
+                endtime=parts[16],
+            )
+        except (TypeError, ValueError):
+            continue
+        targets.append(target)
+    return targets
 
-    rows = list(rows_by_station.values())
-    if not rows:
-        raise ValueError(f"No station metadata returned by {STATION_SERVICE_URL}")
-    return rows
+
+def _channel_query_params(msnoise_cfg: dict) -> dict[str, object]:
+    bounds = require_mapping(msnoise_cfg, "geographic_bounds")
+    params: dict[str, object] = {
+        "channel": require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"),
+        "starttime": require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"),
+        "endtime": require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"),
+        "level": "channel",
+        "format": "text",
+        "nodata": "404",
+        "location": LOCATION,
+    }
+    for key in ("minlatitude", "maxlatitude", "minlongitude", "maxlongitude"):
+        params[key] = require_value(bounds, key, "dvv_calculation.msnoise.geographic_bounds")
+    return params
+
+
+def _discover_provider_channels(provider: FdsnProvider, msnoise_cfg: dict, timeout: int) -> list[ChannelTarget]:
+    url = _query_url(provider.station_url, _channel_query_params(msnoise_cfg))
+    print(f"Querying {provider.name} station channels: {url}", flush=True)
+    try:
+        payload = _fetch_text_url(url, timeout)
+    except Exception as exc:
+        print(f"WARNING: {provider.name} station query failed: {exc}", flush=True)
+        return []
+    return _parse_channel_text(payload, provider.name, provider.station_url, provider.dataselect_url)
+
+
+def _routing_query_params(msnoise_cfg: dict, service: str) -> dict[str, object]:
+    bounds = require_mapping(msnoise_cfg, "geographic_bounds")
+    params: dict[str, object] = {
+        "service": service,
+        "channel": require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"),
+        "starttime": require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"),
+        "endtime": require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"),
+        "format": "post",
+    }
+    # EIDA routing uses long latitude names; EarthScope fedcatalog uses short aliases.
+    if "irisws/fedcatalog" in service:
+        return params
+    params["minlatitude"] = require_value(bounds, "minlatitude", "dvv_calculation.msnoise.geographic_bounds")
+    params["maxlatitude"] = require_value(bounds, "maxlatitude", "dvv_calculation.msnoise.geographic_bounds")
+    params["minlongitude"] = require_value(bounds, "minlongitude", "dvv_calculation.msnoise.geographic_bounds")
+    params["maxlongitude"] = require_value(bounds, "maxlongitude", "dvv_calculation.msnoise.geographic_bounds")
+    return params
+
+
+def _parse_routing_post(payload: str) -> list[tuple[str, list[str]]]:
+    routes: list[tuple[str, list[str]]] = []
+    current_url = ""
+    for raw_line in payload.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("nodata="):
+            continue
+        if line.startswith("DATASELECTSERVICE="):
+            current_url = _canonical_dataselect_url(line.split("=", 1)[1])
+            continue
+        if line.startswith("http://") or line.startswith("https://"):
+            current_url = _canonical_dataselect_url(line)
+            continue
+        if current_url:
+            parts = line.split()
+            if len(parts) >= 6:
+                routes.append((current_url, parts[:6]))
+    return routes
+
+
+def _expand_routes_to_channels(
+    routes: list[tuple[str, list[str]]],
+    msnoise_cfg: dict,
+    timeout: int,
+) -> list[ChannelTarget]:
+    targets: list[ChannelTarget] = []
+    seen_urls: set[str] = set()
+    for dataselect_url, _parts in routes:
+        if dataselect_url in seen_urls:
+            continue
+        seen_urls.add(dataselect_url)
+        station_url = _station_url_from_dataselect(dataselect_url)
+        provider = urllib.parse.urlparse(dataselect_url).netloc or "routing"
+        url = _query_url(station_url, _channel_query_params(msnoise_cfg))
+        print(f"Querying routed station channels: {url}", flush=True)
+        try:
+            payload = _fetch_text_url(url, timeout)
+        except Exception as exc:
+            print(f"WARNING: routed station channel query failed at {station_url}: {exc}", flush=True)
+            continue
+        targets.extend(_parse_channel_text(payload, provider, station_url, dataselect_url))
+    return targets
+
+
+def _discover_routed_channels(msnoise_cfg: dict, timeout: int) -> list[ChannelTarget]:
+    targets: list[ChannelTarget] = []
+    for routing_url in ROUTING_SERVICE_URLS:
+        params = _routing_query_params(msnoise_cfg, "dataselect")
+        if "irisws/fedcatalog" in routing_url:
+            bounds = require_mapping(msnoise_cfg, "geographic_bounds")
+            params = {
+                "format": "request",
+                "includeoverlaps": "true",
+                "cha": require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"),
+                "starttime": require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"),
+                "endtime": require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"),
+                "minlat": require_value(bounds, "minlatitude", "dvv_calculation.msnoise.geographic_bounds"),
+                "maxlat": require_value(bounds, "maxlatitude", "dvv_calculation.msnoise.geographic_bounds"),
+                "minlon": require_value(bounds, "minlongitude", "dvv_calculation.msnoise.geographic_bounds"),
+                "maxlon": require_value(bounds, "maxlongitude", "dvv_calculation.msnoise.geographic_bounds"),
+                "nodata": "404",
+            }
+        url = _query_url(routing_url, params)
+        print(f"Querying routing service: {url}", flush=True)
+        try:
+            payload = _fetch_text_url(url, timeout)
+        except Exception as exc:
+            print(f"WARNING: routing query failed: {exc}", flush=True)
+            continue
+        targets.extend(_expand_routes_to_channels(_parse_routing_post(payload), msnoise_cfg, timeout))
+    return targets
+
+
+def discover_channel_targets(msnoise_cfg: dict) -> list[ChannelTarget]:
+    timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
+    targets_by_key: dict[tuple[str, str, str, str], ChannelTarget] = {}
+    provider_counts: dict[str, int] = {}
+
+    for provider in FDSN_PROVIDERS:
+        provider_targets = _discover_provider_channels(provider, msnoise_cfg, timeout)
+        provider_counts[provider.name] = len(provider_targets)
+        for target in provider_targets:
+            targets_by_key[_target_key(target)] = target
+
+    routed_targets = _discover_routed_channels(msnoise_cfg, timeout)
+    provider_counts["routing"] = len(routed_targets)
+    for target in routed_targets:
+        targets_by_key[_target_key(target)] = target
+
+    targets = sorted(targets_by_key.values(), key=lambda item: (item.network, item.station, item.location, item.channel))
+    min_sample_rate = float(msnoise_cfg.get("min_sample_rate", 0) or 0)
+    if min_sample_rate > 0:
+        targets = [target for target in targets if target.sample_rate >= min_sample_rate]
+    max_channels = int(msnoise_cfg.get("max_channels", 0) or 0)
+    if max_channels > 0:
+        targets = targets[:max_channels]
+
+    print("FDSN discovery summary:", flush=True)
+    for provider, count in sorted(provider_counts.items()):
+        print(f"  {provider}: {count} channel target(s)", flush=True)
+    print(f"  unique retained channel targets: {len(targets)}", flush=True)
+    for target in targets[:20]:
+        print(f"    {target.provider}: {target.seed_id} {target.starttime} to {target.endtime}", flush=True)
+    if len(targets) > 20:
+        print(f"    ... {len(targets) - 20} additional target(s)", flush=True)
+    if not targets:
+        raise ValueError("No accessible channel metadata found for the configured bounds and time range.")
+    return targets
 
 
 def _write_sds_trace(trace, sds_root: Path) -> Path:
@@ -233,7 +454,6 @@ def _write_sds_trace(trace, sds_root: Path) -> Path:
 def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
     import obspy
 
-    channels = str(require_value(msnoise_cfg, "channels", "dvv_calculation.msnoise"))
     start_date = str(require_value(msnoise_cfg, "start_date", "dvv_calculation.msnoise"))
     end_date = str(require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"))
     timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
@@ -250,27 +470,41 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     sds_root.mkdir(parents=True, exist_ok=True)
     raw_root.mkdir(parents=True, exist_ok=True)
 
-    station_rows = load_station_metadata(msnoise_cfg)
-    download_targets = [(str(row["net"]), str(row["sta"])) for row in station_rows]
-    downloaded_by_station = {f"{network}.{station}": 0 for network, station in download_targets}
+    channel_targets = discover_channel_targets(msnoise_cfg)
+    downloaded_by_channel = {target.seed_id: 0 for target in channel_targets}
+    no_data_by_channel = {target.seed_id: 0 for target in channel_targets}
+    downloaded_stations: dict[tuple[str, str], dict[str, object]] = {}
 
-    for network, station in download_targets:
+    for target in channel_targets:
         for chunk_start, chunk_end in _iter_time_chunks(start_date, end_date, chunk_hours):
-            raw_path = raw_root / f"{network}.{station}.{chunk_start.replace(':', '').replace('-', '')}.mseed"
+            timestamp = chunk_start.replace(":", "").replace("-", "")
+            raw_path = raw_root / f"{target.seed_id}.{timestamp}.mseed"
             part_path = raw_path.with_suffix(raw_path.suffix + ".part")
             if skip_existing_downloads and raw_path.exists() and raw_path.stat().st_size > 0:
-                print(f"Using existing {network}.{station} {chunk_start} to {chunk_end}", flush=True)
-                downloaded_by_station[f"{network}.{station}"] += 1
+                print(f"Using existing {target.seed_id} {chunk_start} to {chunk_end}", flush=True)
+                stream = obspy.read(str(raw_path))
+                stream.merge(method=1, fill_value="interpolate")
+                for trace in stream:
+                    _write_sds_trace(trace, sds_root)
+                downloaded_by_channel[target.seed_id] += 1
+                downloaded_stations[(target.network, target.station)] = {
+                    "net": target.network,
+                    "sta": target.station,
+                    "lon": target.longitude,
+                    "lat": target.latitude,
+                    "elev": target.elevation,
+                }
                 continue
-            query = DATASELECT_URL + "?" + urllib.parse.urlencode(
+            query = _query_url(
+                target.dataselect_url,
                 {
-                    "network": network,
-                    "station": station,
-                    "location": LOCATION,
-                    "channel": channels,
+                    "network": target.network,
+                    "station": target.station,
+                    "location": _as_dataselect_location(target.location),
+                    "channel": target.channel,
                     "starttime": chunk_start,
                     "endtime": chunk_end,
-                }
+                },
             )
             command = [
                 "curl",
@@ -286,26 +520,27 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 "%{http_code}",
                 query,
             ]
-            print(f"Downloading {network}.{station} {chunk_start} to {chunk_end}", flush=True)
+            print(f"Downloading {target.seed_id} from {target.provider} {chunk_start} to {chunk_end}", flush=True)
             if part_path.exists():
                 part_path.unlink()
             result = subprocess.run(command, check=False, capture_output=True, text=True)
             http_code = result.stdout.strip()
-            if http_code == "204" and result.returncode == 0:
+            if http_code in {"204", "404"} and result.returncode == 0:
                 message = (
-                    f"No waveform data returned for {network}.{station} "
-                    f"{chunk_start} to {chunk_end} (HTTP 204)."
+                    f"No waveform data returned for {target.seed_id} "
+                    f"{chunk_start} to {chunk_end} (HTTP {http_code})."
                 )
                 if no_data_behavior == "skip":
                     print(f"WARNING: {message} Skipping this chunk.", flush=True)
                     if part_path.exists():
                         part_path.unlink()
+                    no_data_by_channel[target.seed_id] += 1
                     continue
                 raise RuntimeError(message)
             if result.returncode != 0 or http_code != "200" or not part_path.exists() or part_path.stat().st_size == 0:
                 raise RuntimeError(
                     "Waveform download failed: "
-                    f"station={network}.{station}, start={chunk_start}, end={chunk_end}, "
+                    f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
                     f"http={http_code}, returncode={result.returncode}, stderr={result.stderr.strip()}"
                 )
 
@@ -314,24 +549,46 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             except Exception as exc:
                 raise RuntimeError(
                     "Downloaded waveform could not be read by ObsPy: "
-                    f"station={network}.{station}, start={chunk_start}, end={chunk_end}, "
+                    f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
                     f"path={part_path}, size={part_path.stat().st_size}"
                 ) from exc
             part_path.replace(raw_path)
             stream.merge(method=1, fill_value="interpolate")
             for trace in stream:
                 _write_sds_trace(trace, sds_root)
-            downloaded_by_station[f"{network}.{station}"] += 1
+            downloaded_by_channel[target.seed_id] += 1
+            downloaded_stations[(target.network, target.station)] = {
+                "net": target.network,
+                "sta": target.station,
+                "lon": target.longitude,
+                "lat": target.latitude,
+                "elev": target.elevation,
+            }
 
-    missing_stations = [station for station, count in downloaded_by_station.items() if count == 0]
-    if missing_stations:
+    print("Waveform download summary:", flush=True)
+    for seed_id in sorted(downloaded_by_channel):
+        downloads = downloaded_by_channel[seed_id]
+        no_data = no_data_by_channel[seed_id]
+        if downloads or no_data:
+            print(f"  {seed_id}: downloaded={downloads}, no_data={no_data}", flush=True)
+    skipped_channels = [seed_id for seed_id, count in downloaded_by_channel.items() if count == 0]
+    if skipped_channels:
+        print("Channels skipped because no waveform chunks were downloaded:", flush=True)
+        for seed_id in skipped_channels[:50]:
+            print(f"  {seed_id}", flush=True)
+        if len(skipped_channels) > 50:
+            print(f"  ... {len(skipped_channels) - 50} additional channel(s)", flush=True)
+    if not downloaded_stations:
         raise RuntimeError(
-            "No waveform chunks were downloaded for station(s): "
-            + ", ".join(missing_stations)
-            + ". Check the configured date range, location, and channel."
+            "No waveform chunks were downloaded for any discovered channel. "
+            "Check the configured date range, bounds, and channel selector."
         )
 
-    return sds_root, station_rows
+    print("Stations admitted to MSNoise:", flush=True)
+    for station in sorted(downloaded_stations):
+        print(f"  {station[0]}.{station[1]}", flush=True)
+
+    return sds_root, list(downloaded_stations.values())
 
 
 def _set_msnoise_config(cursor, name: str, value: object) -> None:
