@@ -22,7 +22,6 @@ DATA_STRUCTURE = "SDS"
 MSNOISE_DB_TECH = "1"
 STATION_COORDINATES = "DEG"
 STATION_INSTRUMENT = "INST"
-LOCATION = "*"
 ROUTING_SERVICE_URLS = (
     "https://www.orfeus-eu.org/eidaws/routing/1/query",
     "https://service.iris.edu/irisws/fedcatalog/1/query",
@@ -216,6 +215,21 @@ def _as_dataselect_location(location: str) -> str:
     return location if location else "--"
 
 
+def _location_selector(msnoise_cfg: dict) -> str:
+    return str(msnoise_cfg.get("location") or "*")
+
+
+def _msnoise_station_name(target: ChannelTarget, msnoise_cfg: dict) -> str:
+    if not bool(msnoise_cfg.get("split_locations_as_stations", False)):
+        return target.station
+    location = target.location or "XX"
+    return f"{target.station[:3]}{location[:2]}".upper()
+
+
+def _prepare_trace_for_msnoise(trace, target: ChannelTarget, msnoise_cfg: dict) -> None:
+    trace.stats.station = _msnoise_station_name(target, msnoise_cfg)
+
+
 def _canonical_dataselect_url(url: str) -> str:
     return url.rstrip("/") + "/query" if not url.rstrip("/").endswith("/query") else url.rstrip("/")
 
@@ -278,7 +292,7 @@ def _channel_query_params(msnoise_cfg: dict) -> dict[str, object]:
         "level": "channel",
         "format": "text",
         "nodata": "404",
-        "location": LOCATION,
+        "location": _location_selector(msnoise_cfg),
     }
     for key in ("minlatitude", "maxlatitude", "minlongitude", "maxlongitude"):
         params[key] = require_value(bounds, key, "dvv_calculation.msnoise.geographic_bounds")
@@ -502,11 +516,13 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 stream = obspy.read(str(raw_path))
                 stream.merge(method=1, fill_value="interpolate")
                 for trace in stream:
+                    _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
                     _write_sds_trace(trace, sds_root)
                 downloaded_by_channel[target.seed_id] += 1
-                downloaded_stations[(target.network, target.station)] = {
+                msnoise_station = _msnoise_station_name(target, msnoise_cfg)
+                downloaded_stations[(target.network, msnoise_station)] = {
                     "net": target.network,
-                    "sta": target.station,
+                    "sta": msnoise_station,
                     "lon": target.longitude,
                     "lat": target.latitude,
                     "elev": target.elevation,
@@ -572,11 +588,13 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             part_path.replace(raw_path)
             stream.merge(method=1, fill_value="interpolate")
             for trace in stream:
+                _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
                 _write_sds_trace(trace, sds_root)
             downloaded_by_channel[target.seed_id] += 1
-            downloaded_stations[(target.network, target.station)] = {
+            msnoise_station = _msnoise_station_name(target, msnoise_cfg)
+            downloaded_stations[(target.network, msnoise_station)] = {
                 "net": target.network,
-                "sta": target.station,
+                "sta": msnoise_station,
                 "lon": target.longitude,
                 "lat": target.latitude,
                 "elev": target.elevation,
