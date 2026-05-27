@@ -63,6 +63,14 @@ channels = "*Z"
 # You can use "BHZ,HHZ", "BH?,HH?", "*Z" or similar to specify multiple channels.
 # If you are using DAS datasets, you should look up the channel code.
 
+location = "*"
+# FDSN location selector used when prepare_project is true.
+# Use comma-separated location codes such as "00,10,60", or "*" for all locations.
+
+split_locations_as_stations = false
+# true maps location-specific channels to separate MSNoise station aliases.
+# For example, ANTO maps location 00/10/60 to ANT00/ANT10/ANT60.
+
 max_channels = 0
 # Optional limit after automatic provider/routing discovery.
 # 0 means no limit.
@@ -294,8 +302,30 @@ min_output_rows = 1
 
 
 [synthetic_dvv_mapping]
-enabled = false
-# Placeholder for the pressure-to-dv/v mapping stage.
+drivers = ["gwl", "atm", "snow", "thermoelastic"]
+# Predictor families from outputs/02-pressure-modeling/pore_pressure_output.csv.
+# Paths are fixed in the stage runner; active_stage controls whether this stage runs.
+# Supported aliases include atmospheric -> atm and temperature -> thermoelastic.
+
+lags_days = [0, 1, 3, 7, 14, 30]
+# Predictor lag grid. A 7-day lag means predictor(t - 7 days) is used for dv/v(t).
+
+observed_pair = "ALL"
+# For merged dv/v CSV files, use the ALL row if available.
+# For raw MSNoise DTT files, ALL means median over non-autocorrelation pairs if no ALL row exists.
+
+observed_component = "ZZ"
+observed_filters = []
+# Empty observed_filters means use every available filter.
+
+fit_intercept = true
+fit_trend = true
+regularization_alpha = 1.0
+# Ridge penalty applied to mapping weights. Intercept and trend are not penalized.
+
+train_fraction = 0.7
+min_samples = 20
+# Chronological train/validation split and minimum overlapping samples per observed series.
 
 
 [correlation_analysis]
