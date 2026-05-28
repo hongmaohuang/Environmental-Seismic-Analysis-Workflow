@@ -238,12 +238,15 @@ def _station_url_from_dataselect(dataselect_url: str) -> str:
     return _canonical_dataselect_url(dataselect_url).replace("/dataselect/1/query", "/station/1/query")
 
 
-def _target_key(target: ChannelTarget) -> tuple[str, str, str, str]:
+def _target_key(target: ChannelTarget) -> tuple[str, str, str, str, str, str, float]:
     return (
         target.network,
         target.station,
         target.location,
         target.channel,
+        target.starttime,
+        target.endtime,
+        target.sample_rate,
     )
 
 
@@ -404,7 +407,7 @@ def _discover_routed_channels(msnoise_cfg: dict, timeout: int) -> list[ChannelTa
 
 def discover_channel_targets(msnoise_cfg: dict) -> list[ChannelTarget]:
     timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
-    targets_by_key: dict[tuple[str, str, str, str], ChannelTarget] = {}
+    targets_by_key: dict[tuple[str, str, str, str, str, str, float], ChannelTarget] = {}
     provider_counts: dict[str, int] = {}
 
     for provider in FDSN_PROVIDERS:
@@ -418,7 +421,10 @@ def discover_channel_targets(msnoise_cfg: dict) -> list[ChannelTarget]:
     for target in routed_targets:
         targets_by_key[_target_key(target)] = target
 
-    targets = sorted(targets_by_key.values(), key=lambda item: (item.network, item.station, item.location, item.channel))
+    targets = sorted(
+        targets_by_key.values(),
+        key=lambda item: (item.network, item.station, item.location, item.channel, item.starttime, item.endtime),
+    )
     min_sample_rate = float(msnoise_cfg.get("min_sample_rate", 0) or 0)
     if min_sample_rate > 0:
         targets = [target for target in targets if target.sample_rate >= min_sample_rate]
@@ -429,7 +435,9 @@ def discover_channel_targets(msnoise_cfg: dict) -> list[ChannelTarget]:
     print("FDSN discovery summary:", flush=True)
     for provider, count in sorted(provider_counts.items()):
         print(f"  {provider}: {count} channel target(s)", flush=True)
-    print(f"  unique retained channel targets: {len(targets)}", flush=True)
+    unique_channels = len({_target_seed_key(target) for target in targets})
+    print(f"  unique retained channel epochs: {len(targets)}", flush=True)
+    print(f"  unique retained channels: {unique_channels}", flush=True)
     for target in targets[:20]:
         print(f"    {target.provider}: {target.seed_id} {target.starttime} to {target.endtime}", flush=True)
     if len(targets) > 20:
@@ -437,6 +445,10 @@ def discover_channel_targets(msnoise_cfg: dict) -> list[ChannelTarget]:
     if not targets:
         raise ValueError("No accessible channel metadata found for the configured bounds and time range.")
     return targets
+
+
+def _target_seed_key(target: ChannelTarget) -> tuple[str, str, str, str]:
+    return (target.network, target.station, target.location, target.channel)
 
 
 def _write_sds_trace(trace, sds_root: Path) -> Path:
@@ -498,9 +510,10 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     raw_root.mkdir(parents=True, exist_ok=True)
 
     channel_targets = discover_channel_targets(msnoise_cfg)
-    downloaded_by_channel = {target.seed_id: 0 for target in channel_targets}
-    no_data_by_channel = {target.seed_id: 0 for target in channel_targets}
-    outside_availability_by_channel = {target.seed_id: 0 for target in channel_targets}
+    channel_seed_ids = sorted({target.seed_id for target in channel_targets})
+    downloaded_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
+    no_data_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
+    outside_availability_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     downloaded_stations: dict[tuple[str, str], dict[str, object]] = {}
 
     for target in channel_targets:
