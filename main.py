@@ -14,6 +14,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parent
 DVV_RUNNER = ROOT / "src" / "01-dvv-calculation" / "runner.py"
 PRESSURE_RUNNER = ROOT / "src" / "02-pressure-modeling" / "runner.py"
+SYNTHETIC_DVV_MAPPING_RUNNER = ROOT / "src" / "03-synthetic-dvv-mapping" / "runner.py"
 
 
 def load_runner(module_name: str, path: Path):
@@ -53,6 +54,12 @@ def main() -> int:
         if stage == "pressure_modeling":
             runner = load_runner("pressure_modeling_runner", PRESSURE_RUNNER)
             result = runner.run_pressure_modeling(cfg)
+            runner.print_result(result)
+            continue
+
+        if stage == "synthetic_dvv_mapping":
+            runner = load_runner("synthetic_dvv_mapping_runner", SYNTHETIC_DVV_MAPPING_RUNNER)
+            result = runner.run_synthetic_dvv_mapping(cfg)
             runner.print_result(result)
             continue
 
