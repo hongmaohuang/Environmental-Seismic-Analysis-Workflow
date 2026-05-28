@@ -226,8 +226,28 @@ def _msnoise_station_name(target: ChannelTarget, msnoise_cfg: dict) -> str:
     return f"{target.station[:3]}{location[:2]}".upper()
 
 
+def _target_sampling_rate(msnoise_cfg: dict) -> float:
+    return float(require_value(msnoise_cfg, "cc_sampling_rate", "dvv_calculation.msnoise"))
+
+
+def _normalize_trace_sampling(trace, target_sampling_rate: float) -> None:
+    current_sampling_rate = float(trace.stats.sampling_rate)
+    if current_sampling_rate <= target_sampling_rate or abs(current_sampling_rate - target_sampling_rate) < 1e-6:
+        trace.data = trace.data.astype("float32")
+        return
+    ratio = current_sampling_rate / target_sampling_rate
+    rounded_ratio = round(ratio)
+    if rounded_ratio > 1 and abs(ratio - rounded_ratio) < 1e-6:
+        trace.decimate(int(rounded_ratio), strict_length=False, no_filter=False)
+        trace.data = trace.data.astype("float32")
+        return
+    trace.resample(target_sampling_rate)
+    trace.data = trace.data.astype("float32")
+
+
 def _prepare_trace_for_msnoise(trace, target: ChannelTarget, msnoise_cfg: dict) -> None:
     trace.stats.station = _msnoise_station_name(target, msnoise_cfg)
+    _normalize_trace_sampling(trace, _target_sampling_rate(msnoise_cfg))
 
 
 def _canonical_dataselect_url(url: str) -> str:
@@ -451,7 +471,7 @@ def _target_seed_key(target: ChannelTarget) -> tuple[str, str, str, str]:
     return (target.network, target.station, target.location, target.channel)
 
 
-def _write_sds_trace(trace, sds_root: Path) -> Path:
+def _write_sds_trace(trace, sds_root: Path, target_sampling_rate: float | None = None) -> Path:
     from obspy import UTCDateTime
     from obspy import read
 
@@ -474,6 +494,10 @@ def _write_sds_trace(trace, sds_root: Path) -> Path:
             written_path = save_dir / fname
             if written_path.exists():
                 combined = read(str(written_path))
+                if target_sampling_rate:
+                    for existing_trace in combined:
+                        _normalize_trace_sampling(existing_trace, target_sampling_rate)
+                    _normalize_trace_sampling(day_slice, target_sampling_rate)
                 combined += day_slice
                 combined.merge(method=1, fill_value="interpolate")
                 tmp_path = written_path.with_name(written_path.name + ".tmp")
@@ -510,6 +534,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     raw_root.mkdir(parents=True, exist_ok=True)
 
     channel_targets = discover_channel_targets(msnoise_cfg)
+    target_sampling_rate = _target_sampling_rate(msnoise_cfg)
     channel_seed_ids = sorted({target.seed_id for target in channel_targets})
     downloaded_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     no_data_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
@@ -530,7 +555,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 stream.merge(method=1, fill_value="interpolate")
                 for trace in stream:
                     _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
-                    _write_sds_trace(trace, sds_root)
+                    _write_sds_trace(trace, sds_root, target_sampling_rate)
                 downloaded_by_channel[target.seed_id] += 1
                 msnoise_station = _msnoise_station_name(target, msnoise_cfg)
                 downloaded_stations[(target.network, msnoise_station)] = {
@@ -602,7 +627,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             stream.merge(method=1, fill_value="interpolate")
             for trace in stream:
                 _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
-                _write_sds_trace(trace, sds_root)
+                _write_sds_trace(trace, sds_root, target_sampling_rate)
             downloaded_by_channel[target.seed_id] += 1
             msnoise_station = _msnoise_station_name(target, msnoise_cfg)
             downloaded_stations[(target.network, msnoise_station)] = {
