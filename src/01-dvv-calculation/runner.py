@@ -514,6 +514,12 @@ def _write_sds_trace(trace, sds_root: Path, target_sampling_rate: float | None =
     return written_path
 
 
+def _write_msnoise_stream(stream, target: ChannelTarget, msnoise_cfg: dict, sds_root: Path, target_sampling_rate: float) -> None:
+    for trace in stream:
+        _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
+        _write_sds_trace(trace, sds_root, target_sampling_rate)
+
+
 def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
     import obspy
 
@@ -552,10 +558,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             if skip_existing_downloads and raw_path.exists() and raw_path.stat().st_size > 0:
                 print(f"Using existing {target.seed_id} {chunk_start} to {chunk_end}", flush=True)
                 stream = obspy.read(str(raw_path))
-                stream.merge(method=1, fill_value="interpolate")
-                for trace in stream:
-                    _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
-                    _write_sds_trace(trace, sds_root, target_sampling_rate)
+                _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
                 downloaded_by_channel[target.seed_id] += 1
                 msnoise_station = _msnoise_station_name(target, msnoise_cfg)
                 downloaded_stations[(target.network, msnoise_station)] = {
@@ -624,10 +627,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                     f"path={part_path}, size={part_path.stat().st_size}"
                 ) from exc
             part_path.replace(raw_path)
-            stream.merge(method=1, fill_value="interpolate")
-            for trace in stream:
-                _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
-                _write_sds_trace(trace, sds_root, target_sampling_rate)
+            _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
             downloaded_by_channel[target.seed_id] += 1
             msnoise_station = _msnoise_station_name(target, msnoise_cfg)
             downloaded_stations[(target.network, msnoise_station)] = {
