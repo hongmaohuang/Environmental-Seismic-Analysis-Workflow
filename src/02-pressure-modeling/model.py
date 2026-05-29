@@ -385,6 +385,12 @@ def compute_tsai_vsv_thermoelastic_response(
     }
 
 
+def depth_label(depth_m):
+    value = float(depth_m)
+    text = f"{value:g}".replace("-", "neg").replace(".", "p")
+    return f"z{text}m"
+
+
 #####################
 ### Main Workflow ###
 #####################
@@ -545,13 +551,15 @@ def run_pore_pressure_workflow(
     out["well_temp_annual_c"] = thermoelastic["temperature_annual_c"].values
     out["well_temp_residual_c"] = out["well_temp_c"] - out["well_temp_annual_c"]
     for depth_m, thermoelastic in thermoelastic_by_depth.items():
-        out[f"dvv_vsv_thermoelastic_annual_z{int(depth_m)}m"] = (
+        label = depth_label(depth_m)
+        out[f"dvv_vsv_thermoelastic_annual_{label}"] = (
             thermoelastic["dvv_vsv_thermoelastic_annual"].values
         )
 
     for loading in loadings:
         out[f"{loading['name']}_loading_pa"] = loading["values_pa"]
         for depth_m in depths_m:
+            label = depth_label(depth_m)
             response = compute_loading_response(
                 loading_pa=loading["values_pa"],
                 depth_m=depth_m,
@@ -559,14 +567,15 @@ def run_pore_pressure_workflow(
                 hydraulic_diffusivity_m2_s=hydraulic_diffusivity_m2_s,
                 poroelastic_alpha=loading["poroelastic_alpha"],
             )
-            out[f"Pp_{loading['name']}_z{int(depth_m)}m_pa"] = response
+            out[f"Pp_{loading['name']}_{label}_pa"] = response
 
     for depth_m in depths_m:
+        label = depth_label(depth_m)
         total_pp = np.zeros(len(out), dtype=float)
         for loading in loadings:
-            total_pp += out[f"Pp_{loading['name']}_z{int(depth_m)}m_pa"].values
-        out[f"Pp_total_z{int(depth_m)}m_pa"] = total_pp
-        out[f"dPp_total_z{int(depth_m)}m_pa"] = total_pp - np.nanmean(total_pp)
+            total_pp += out[f"Pp_{loading['name']}_{label}_pa"].values
+        out[f"Pp_total_{label}_pa"] = total_pp
+        out[f"dPp_total_{label}_pa"] = total_pp - np.nanmean(total_pp)
 
     out.to_csv(output_csv_path, index=True, index_label="datetime")
     return out
