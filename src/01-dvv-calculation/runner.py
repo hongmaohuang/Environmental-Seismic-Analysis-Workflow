@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -18,6 +20,9 @@ except ModuleNotFoundError:
 
 MSNOISE_PROJECT_DIR = "outputs/dvv_calculation/testing"
 SDS_FOLDER = "SDS"
+RAW_MSEED_FOLDER = "raw_mseed"
+SDS_MANIFEST_FILENAME = ".sds_written_chunks.json"
+CHANNEL_METADATA_FILENAME = "channel_metadata.csv"
 DATA_STRUCTURE = "SDS"
 MSNOISE_DB_TECH = "1"
 STATION_COORDINATES = "DEG"
@@ -518,10 +523,109 @@ def _write_sds_trace(trace, sds_root: Path, target_sampling_rate: float | None =
     return written_path
 
 
+def _chunk_manifest_key(target: ChannelTarget, chunk_start: str, chunk_end: str) -> str:
+    return "|".join(
+        (
+            target.provider,
+            target.seed_id,
+            target.starttime,
+            target.endtime,
+            str(target.sample_rate),
+            chunk_start,
+            chunk_end,
+        )
+    )
+
+
+def _load_sds_manifest(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(item) for item in data}
+
+
+def _save_sds_manifest(path: Path, manifest: set[str]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(sorted(manifest), indent=2) + "\n")
+    tmp_path.replace(path)
+
+
 def _write_msnoise_stream(stream, target: ChannelTarget, msnoise_cfg: dict, sds_root: Path, target_sampling_rate: float) -> None:
     for trace in stream:
         _prepare_trace_for_msnoise(trace, target, msnoise_cfg)
         _write_sds_trace(trace, sds_root, target_sampling_rate)
+
+
+def _normalize_existing_sds_files(sds_root: Path, target_sampling_rate: float) -> None:
+    from obspy import read
+
+    repaired = 0
+    for file_path in sorted(sds_root.rglob("*")):
+        if not file_path.is_file():
+            continue
+        stream = read(str(file_path))
+        original_rates = [float(trace.stats.sampling_rate) for trace in stream]
+        for trace in stream:
+            _normalize_trace_sampling(trace, target_sampling_rate)
+        stream.merge(method=1, fill_value="interpolate")
+        normalized_rates = [float(trace.stats.sampling_rate) for trace in stream]
+        if original_rates == normalized_rates and len(original_rates) == len(stream):
+            continue
+        tmp_path = file_path.with_name(file_path.name + ".tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        stream.write(str(tmp_path), format="MSEED")
+        tmp_path.replace(file_path)
+        repaired += 1
+    if repaired:
+        print(f"Normalized {repaired} existing SDS file(s) to {target_sampling_rate:g} Hz.", flush=True)
+
+
+def _write_channel_metadata(project_dir: Path, targets: list[ChannelTarget], msnoise_cfg: dict) -> None:
+    metadata_path = project_dir / CHANNEL_METADATA_FILENAME
+    with metadata_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "provider",
+                "network",
+                "station",
+                "location",
+                "channel",
+                "msnoise_station",
+                "latitude",
+                "longitude",
+                "elevation",
+                "original_sample_rate",
+                "target_sample_rate",
+                "starttime",
+                "endtime",
+            ],
+        )
+        writer.writeheader()
+        for target in targets:
+            writer.writerow(
+                {
+                    "provider": target.provider,
+                    "network": target.network,
+                    "station": target.station,
+                    "location": target.location,
+                    "channel": target.channel,
+                    "msnoise_station": _msnoise_station_name(target, msnoise_cfg),
+                    "latitude": target.latitude,
+                    "longitude": target.longitude,
+                    "elevation": target.elevation,
+                    "original_sample_rate": target.sample_rate,
+                    "target_sample_rate": _target_sampling_rate(msnoise_cfg),
+                    "starttime": target.starttime,
+                    "endtime": target.endtime,
+                }
+            )
 
 
 def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
@@ -539,12 +643,15 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     if chunk_hours <= 0:
         raise ValueError("dvv_calculation.msnoise.download_chunk_hours must be positive")
     sds_root = project_dir / SDS_FOLDER
-    raw_root = project_dir / "raw_mseed"
+    raw_root = project_dir / RAW_MSEED_FOLDER
     sds_root.mkdir(parents=True, exist_ok=True)
     raw_root.mkdir(parents=True, exist_ok=True)
 
     channel_targets = discover_channel_targets(msnoise_cfg)
     target_sampling_rate = _target_sampling_rate(msnoise_cfg)
+    _write_channel_metadata(project_dir, channel_targets, msnoise_cfg)
+    manifest_path = project_dir / SDS_MANIFEST_FILENAME
+    sds_manifest = _load_sds_manifest(manifest_path)
     channel_seed_ids = sorted({target.seed_id for target in channel_targets})
     downloaded_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     no_data_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
@@ -559,10 +666,16 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             timestamp = chunk_start.replace(":", "").replace("-", "")
             raw_path = raw_root / f"{target.seed_id}.{timestamp}.mseed"
             part_path = raw_path.with_suffix(raw_path.suffix + ".part")
+            manifest_key = _chunk_manifest_key(target, chunk_start, chunk_end)
             if skip_existing_downloads and raw_path.exists() and raw_path.stat().st_size > 0:
                 print(f"Using existing {target.seed_id} {chunk_start} to {chunk_end}", flush=True)
-                stream = obspy.read(str(raw_path))
-                _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
+                if manifest_key not in sds_manifest:
+                    stream = obspy.read(str(raw_path))
+                    _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
+                    sds_manifest.add(manifest_key)
+                    _save_sds_manifest(manifest_path, sds_manifest)
+                else:
+                    print(f"Skipping SDS rewrite for already processed {target.seed_id} {chunk_start} to {chunk_end}", flush=True)
                 downloaded_by_channel[target.seed_id] += 1
                 msnoise_station = _msnoise_station_name(target, msnoise_cfg)
                 downloaded_stations[(target.network, msnoise_station)] = {
@@ -632,6 +745,8 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 ) from exc
             part_path.replace(raw_path)
             _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
+            sds_manifest.add(manifest_key)
+            _save_sds_manifest(manifest_path, sds_manifest)
             downloaded_by_channel[target.seed_id] += 1
             msnoise_station = _msnoise_station_name(target, msnoise_cfg)
             downloaded_stations[(target.network, msnoise_station)] = {
@@ -767,9 +882,7 @@ def clear_msnoise_jobs(project_dir: Path) -> None:
         conn.close()
 
 
-def _scan_msnoise_project(msnoise_cfg: dict, project_dir: Path, sds_root: Path, station_rows: list[dict[str, object]]) -> None:
-    import obspy
-
+def _write_msnoise_station_table(msnoise_cfg: dict, project_dir: Path, station_rows: list[dict[str, object]]) -> None:
     db_path = project_dir / "msnoise.sqlite"
     if not db_path.exists():
         raise FileNotFoundError(f"MSNoise database was not initialized: {db_path}")
@@ -792,36 +905,54 @@ def _scan_msnoise_project(msnoise_cfg: dict, project_dir: Path, sds_root: Path, 
                 (row["net"], row["sta"], row["lon"], row["lat"], row["elev"], STATION_COORDINATES, STATION_INSTRUMENT),
             )
 
-        cursor.execute("DELETE FROM data_availability")
-        count = 0
-        for file_path in sorted(sds_root.rglob("*")):
-            if not file_path.is_file():
-                continue
-            stream = obspy.read(str(file_path), headonly=True)
-            trace = stream[0]
-            cursor.execute(
-                """
-                INSERT INTO data_availability
-                (net, sta, comp, path, file, starttime, endtime, data_duration, gaps_duration, samplerate, flag)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'N')
-                """,
-                (
-                    trace.stats.network,
-                    trace.stats.station,
-                    trace.stats.channel,
-                    str(file_path.parent.relative_to(project_dir)),
-                    file_path.name,
-                    trace.stats.starttime.datetime,
-                    trace.stats.endtime.datetime,
-                    trace.stats.endtime - trace.stats.starttime,
-                    trace.stats.sampling_rate,
-                ),
-            )
-            count += 1
         conn.commit()
-        print(f"MSNoise SDS scan registered {count} files.")
     finally:
         conn.close()
+
+
+def _clear_msnoise_data_availability(project_dir: Path) -> None:
+    db_path = project_dir / "msnoise.sqlite"
+    if not db_path.exists():
+        raise FileNotFoundError(f"MSNoise database was not initialized: {db_path}")
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM data_availability")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_msnoise_scan_archive(project_dir: Path, sds_root: Path) -> None:
+    command = ["msnoise", "scan_archive", "--path", str(sds_root), "--recursively", "--init"]
+    result = subprocess.run(command, cwd=project_dir, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        print("MSNoise scan_archive --init completed.", flush=True)
+        return
+
+    combined_output = f"{result.stdout}\n{result.stderr}".lower()
+    if "--init" not in combined_output and "no such option" not in combined_output and "unrecognized" not in combined_output:
+        raise RuntimeError(
+            "MSNoise scan_archive failed: "
+            f"command={' '.join(command)}, stdout={result.stdout.strip()}, stderr={result.stderr.strip()}"
+        )
+
+    fallback_command = ["msnoise", "scan_archive", "--path", str(sds_root), "--recursively"]
+    fallback = subprocess.run(fallback_command, cwd=project_dir, check=False, capture_output=True, text=True)
+    if fallback.returncode != 0:
+        raise RuntimeError(
+            "MSNoise scan_archive failed: "
+            f"command={' '.join(fallback_command)}, stdout={fallback.stdout.strip()}, stderr={fallback.stderr.strip()}"
+        )
+    print("MSNoise scan_archive completed.", flush=True)
+
+
+def _scan_msnoise_project(msnoise_cfg: dict, project_dir: Path, sds_root: Path, station_rows: list[dict[str, object]]) -> None:
+    _normalize_existing_sds_files(sds_root, _target_sampling_rate(msnoise_cfg))
+    _write_msnoise_station_table(msnoise_cfg, project_dir, station_rows)
+    _clear_msnoise_data_availability(project_dir)
+    _run_msnoise_scan_archive(project_dir, sds_root)
 
 
 def run_msnoise_project_setup(msnoise_cfg: dict, project_dir: Path) -> None:
