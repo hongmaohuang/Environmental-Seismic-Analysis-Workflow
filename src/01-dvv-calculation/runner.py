@@ -232,7 +232,11 @@ def _target_sampling_rate(msnoise_cfg: dict) -> float:
 
 def _normalize_trace_sampling(trace, target_sampling_rate: float) -> None:
     current_sampling_rate = float(trace.stats.sampling_rate)
-    if current_sampling_rate <= target_sampling_rate or abs(current_sampling_rate - target_sampling_rate) < 1e-6:
+    if abs(current_sampling_rate - target_sampling_rate) < 1e-6:
+        trace.data = trace.data.astype("float32")
+        return
+    if current_sampling_rate < target_sampling_rate:
+        trace.interpolate(sampling_rate=target_sampling_rate, method="linear")
         trace.data = trace.data.astype("float32")
         return
     ratio = current_sampling_rate / target_sampling_rate
