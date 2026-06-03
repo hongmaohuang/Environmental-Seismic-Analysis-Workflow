@@ -30,6 +30,43 @@ First, choose the workflow stage to run. The available stages are `dvv_calculati
 
 Most options are documented directly in `config.toml`; please review the inline comments before running a new workflow.
 
+## Input File Formats
+Input files are configured in `config.toml`. Relative paths are resolved from the project root.
+
+### Pressure modeling inputs
+The pressure-modeling stage reads standardized CSV files with the following columns:
+
+- `groundwater_csv_path`: `time`, `temperature`, `groundwater level [m a.s.l.]`
+- `atmospheric_pressure_csv_path`: `time`, `atmosphere pressure`
+- `snow_csv_path`: `time`, `snow depth`; optional: `snow cover`
+
+Units:
+
+- `time` must be parseable by pandas.
+- `temperature` is in degrees Celsius.
+- `groundwater level [m a.s.l.]` is in meters above sea level.
+- `atmosphere pressure` must be in Pa.
+- `snow depth` is snow thickness in meters. The snow density used to convert depth to load is set by `pressure_modeling.snow_density_kg_m3`.
+- `snow cover`, when provided, is a percentage from 0 to 100.
+
+Optional external pressure loadings can be supplied with `pressure_modeling.external_pressure_loading_csv_path`. This file must contain `time` and one or more columns named `<driver>_loading_pa`, for example `ocean_tide_loading_pa` or `hydl_ewh_loading_pa`. These values must already be surface load or pressure in Pa. Do not place displacement, strain, or gravity-change predictors in this file.
+
+### Synthetic dv/v mapping external predictors
+The synthetic dv/v mapping stage always reads predictors from `outputs/02-pressure-modeling/pore_pressure_output.csv`. It can also read additional external predictor CSV files listed in `synthetic_dvv_mapping.external_predictor_paths`.
+
+Each external predictor CSV must contain:
+
+- `datetime`
+- one or more numeric predictor columns
+
+Predictor columns should be named `<driver>_<component>`. For GFZ-style loading deformation predictors, supported components are `duEW`, `duNS`, `duV`, and `dg`. Example columns are:
+
+- `ntal_cf_duV`
+- `ntol_cf_duEW`
+- `hydl_cf_dg`
+
+The driver prefix must match an entry in `synthetic_dvv_mapping.drivers`, such as `ntal_cf`, `ntol_cf`, or `hydl_cf`. `duEW`, `duNS`, and `duV` are displacement components in meters; `dg` is gravity change in `1e-8 m/s2`. These predictors are used directly in the mapping stage and are not converted to pore pressure.
+
 ## Formulation
 *This section is under development. Please refer to the articles listed in the References section for now.*
 
