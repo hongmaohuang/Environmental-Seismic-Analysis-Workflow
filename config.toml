@@ -315,7 +315,7 @@ drivers = ["gwl", "atm", "snow", "thermoelastic", "ntal_cf", "ntol_cf", "hydl_cf
 # Supported aliases include atmospheric -> atm and temperature -> thermoelastic.
 
 external_predictor_paths = [
-  "inputs/03-loading-predictors/gfz_loading_cf_icebbox_center_20210301_20220101_combined.csv",
+  "inputs/03-loading-predictors/loading_input_demo.csv",
 ]
 # Optional src/03-only predictor CSVs. Required column: datetime.
 # Current GFZ loading predictors are displacement/gravity terms, not pressure:
