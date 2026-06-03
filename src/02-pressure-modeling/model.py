@@ -79,6 +79,37 @@ def read_snow(filepath):
         columns.append("snow_cover")
     return out[columns]
 
+
+def read_external_pressure_loadings(filepath):
+    """
+    Read optional external surface-load inputs.
+
+    Required schema:
+    time, <driver>_loading_pa, ...
+
+    These values must already be pressure/load in Pa. Displacement, strain,
+    gravity, or other deformation predictors should be handled in src/03.
+    """
+    df = pd.read_csv(filepath)
+    if "time" not in df.columns:
+        raise ValueError(f"External pressure loading CSV is missing time column: {filepath}")
+
+    loading_columns = [column for column in df.columns if column.endswith("_loading_pa")]
+    if not loading_columns:
+        raise ValueError(
+            "External pressure loading CSV must contain at least one column ending "
+            f"with _loading_pa: {filepath}"
+        )
+
+    df["time"] = pd.to_datetime(df["time"])
+    for column in loading_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    out = df.set_index("time").sort_index()[loading_columns].dropna(how="all")
+    if out.empty:
+        raise ValueError(f"External pressure loading CSV has no usable loading values: {filepath}")
+    return out
+
 def infer_median_dt_seconds(index):
     """
     Calculate time step of original inputs
@@ -419,6 +450,7 @@ def run_pore_pressure_workflow(
     thermal_diffusivity_m2_s,
     incompetent_layer_thickness_m,
     snow_density_kg_m3,
+    external_pressure_loading_csv_path=None,
 ):
     """
     Run the functions above all together to get the result
@@ -493,6 +525,19 @@ def run_pore_pressure_workflow(
                 filepath=snow_csv_path,
             )
 
+    external_loading_rs = None
+    if external_pressure_loading_csv_path not in (None, ""):
+        external_loadings = read_external_pressure_loadings(external_pressure_loading_csv_path)
+        external_loading_rs = prepare_time_series(
+            external_loadings,
+            start=start,
+            end=end,
+            rule=resample_rule,
+            target_index=model_index,
+            dataset_name="external pressure loadings",
+            filepath=external_pressure_loading_csv_path,
+        )
+
     poroelastic_alpha = compute_poroelastic_alpha(
         skempton_b=skempton_b,
         undrained_poisson_ratio=undrained_poisson_ratio,
@@ -514,6 +559,16 @@ def run_pore_pressure_workflow(
         snow_depth_m=snow_rs.values if snow_rs is not None else None,
         snow_density_kg_m3=snow_density_kg_m3,
     )
+    if external_loading_rs is not None:
+        for column in external_loading_rs.columns:
+            name = column[: -len("_loading_pa")]
+            loadings.append(
+                {
+                    "name": name,
+                    "values_pa": external_loading_rs[column].values,
+                    "poroelastic_alpha": poroelastic_alpha,
+                }
+            )
 
     depths_m = tuple(float(depth) for depth in depths_m)
     if not depths_m:

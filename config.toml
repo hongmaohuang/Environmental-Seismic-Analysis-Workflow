@@ -235,6 +235,12 @@ snow_csv_path = "inputs/02-pressure-modeling/snow.csv"
 # Optional column: snow cover.
 # Snow loading is always included in the pressure-modeling stage.
 
+external_pressure_loading_csv_path = ""
+# Optional external pressure-loading input for the pore-pressure model.
+# Required columns when configured: time, <driver>_loading_pa.
+# Values must already be surface load or pressure in Pa. Do not put GFZ
+# displacement predictors such as duV, duNS, or duEW here.
+
 resample_rule = "1D"
 # Sampling rate of the final result.
 # If source data are coarser than this final grid, the runner warns and interpolates.
@@ -302,10 +308,18 @@ min_output_rows = 1
 
 
 [synthetic_dvv_mapping]
-drivers = ["gwl", "atm", "snow", "thermoelastic"]
-# Predictor families from outputs/02-pressure-modeling/pore_pressure_output.csv.
+drivers = ["gwl", "atm", "snow", "thermoelastic", "ntal_cf", "ntol_cf", "hydl_cf"]
+# Predictor families from outputs/02-pressure-modeling/pore_pressure_output.csv
+# and optional external predictor CSVs.
 # Paths are fixed in the stage runner; active_stage controls whether this stage runs.
 # Supported aliases include atmospheric -> atm and temperature -> thermoelastic.
+
+external_predictor_paths = [
+  "inputs/03-loading-predictors/gfz_loading_cf_icebbox_center_20210301_20220101_combined.csv",
+]
+# Optional src/03-only predictor CSVs. Required column: datetime.
+# Current GFZ loading predictors are displacement/gravity terms, not pressure:
+# duEW/duNS/duV are meters, hydl_cf_dg is 1e-8 m/s2.
 
 lags_days = [0, 1, 3, 7, 14, 30]
 # Predictor lag grid. A 7-day lag means predictor(t - 7 days) is used for dv/v(t).

@@ -75,6 +75,13 @@ def require_bool(mapping: dict, key: str, context: str) -> bool:
     return value
 
 
+def config_value(mapping: dict, key: str, default):
+    value = mapping.get(key, default)
+    if value in (None, ""):
+        return default
+    return value
+
+
 def _load_model_module():
     module_dir = str(MODEL_PATH.parent)
     sys.path.insert(0, module_dir)
@@ -160,6 +167,9 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
         cfg, require_value(pressure_cfg, "atmospheric_pressure_csv_path", "pressure_modeling")
     )
     snow_path = _as_optional_path(cfg, require_configured(pressure_cfg, "snow_csv_path", "pressure_modeling"))
+    external_pressure_loading_path = _as_optional_path(
+        cfg, config_value(pressure_cfg, "external_pressure_loading_csv_path", "")
+    )
     output_dir = resolve_path(cfg, OUTPUT_DIR)
     output_csv = output_dir / OUTPUT_SUBDIR / OUTPUT_FILENAME
 
@@ -168,6 +178,11 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
     if snow_path is None:
         raise KeyError("pressure_modeling.snow_csv_path is required because snow loading is enabled")
     _validate_input_file(snow_path, "pressure_modeling.snow_csv_path")
+    if external_pressure_loading_path is not None:
+        _validate_input_file(
+            external_pressure_loading_path,
+            "pressure_modeling.external_pressure_loading_csv_path",
+        )
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     depths_m = tuple(float(depth) for depth in require_value(pressure_cfg, "depths_m", "pressure_modeling"))
@@ -214,6 +229,7 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
             require_value(pressure_cfg, "incompetent_layer_thickness_m", "pressure_modeling")
         ),
         snow_density_kg_m3=float(require_value(pressure_cfg, "snow_density_kg_m3", "pressure_modeling")),
+        external_pressure_loading_csv_path=external_pressure_loading_path,
     )
 
     result = PressureModelingResult(
