@@ -655,6 +655,7 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     channel_seed_ids = sorted({target.seed_id for target in channel_targets})
     downloaded_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     no_data_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
+    failed_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     outside_availability_by_channel = {seed_id: 0 for seed_id in channel_seed_ids}
     downloaded_stations: dict[tuple[str, str], dict[str, object]] = {}
 
@@ -670,7 +671,18 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
             if skip_existing_downloads and raw_path.exists() and raw_path.stat().st_size > 0:
                 print(f"Using existing {target.seed_id} {chunk_start} to {chunk_end}", flush=True)
                 if manifest_key not in sds_manifest:
-                    stream = obspy.read(str(raw_path))
+                    try:
+                        stream = obspy.read(str(raw_path))
+                    except Exception as exc:
+                        failed_by_channel[target.seed_id] += 1
+                        print(
+                            "WARNING: Existing waveform could not be read by ObsPy; "
+                            "skipping this chunk. "
+                            f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
+                            f"path={raw_path}, size={raw_path.stat().st_size}, error={exc}",
+                            flush=True,
+                        )
+                        continue
                     _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
                     sds_manifest.add(manifest_key)
                     _save_sds_manifest(manifest_path, sds_manifest)
@@ -729,20 +741,31 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                     continue
                 raise RuntimeError(message)
             if result.returncode != 0 or http_code != "200" or not part_path.exists() or part_path.stat().st_size == 0:
-                raise RuntimeError(
-                    "Waveform download failed: "
+                failed_by_channel[target.seed_id] += 1
+                print(
+                    "WARNING: Waveform download failed; skipping this chunk. "
                     f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
-                    f"http={http_code}, returncode={result.returncode}, stderr={result.stderr.strip()}"
+                    f"http={http_code}, returncode={result.returncode}, stderr={result.stderr.strip()}",
+                    flush=True,
                 )
+                if part_path.exists():
+                    part_path.unlink()
+                continue
 
             try:
                 stream = obspy.read(str(part_path))
             except Exception as exc:
-                raise RuntimeError(
-                    "Downloaded waveform could not be read by ObsPy: "
+                failed_by_channel[target.seed_id] += 1
+                print(
+                    "WARNING: Downloaded waveform could not be read by ObsPy; "
+                    "skipping this chunk. "
                     f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
-                    f"path={part_path}, size={part_path.stat().st_size}"
-                ) from exc
+                    f"path={part_path}, size={part_path.stat().st_size}, error={exc}",
+                    flush=True,
+                )
+                if part_path.exists():
+                    part_path.unlink()
+                continue
             part_path.replace(raw_path)
             _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
             sds_manifest.add(manifest_key)
@@ -761,11 +784,13 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     for seed_id in sorted(downloaded_by_channel):
         downloads = downloaded_by_channel[seed_id]
         no_data = no_data_by_channel[seed_id]
+        failed = failed_by_channel[seed_id]
         outside_availability = outside_availability_by_channel[seed_id]
-        if downloads or no_data or outside_availability:
+        if downloads or no_data or failed or outside_availability:
             print(
                 f"  {seed_id}: downloaded={downloads}, "
-                f"no_data={no_data}, outside_availability={outside_availability}",
+                f"no_data={no_data}, failed={failed}, "
+                f"outside_availability={outside_availability}",
                 flush=True,
             )
     skipped_channels = [seed_id for seed_id, count in downloaded_by_channel.items() if count == 0]
