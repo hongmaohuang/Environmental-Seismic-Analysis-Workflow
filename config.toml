@@ -95,9 +95,20 @@ download_timeout = 120
 curl_retries = 5
 # Curl retry count for each waveform request.
 
+curl_retry_delay = 5
+# Seconds to wait between curl retries.
+
+waveform_download_attempts = 3
+# Number of full download-and-ObsPy-read attempts for each waveform chunk.
+# This catches cases where curl returns HTTP 200 but the miniSEED payload is corrupt.
+
 no_data_behavior = "skip"
 # Behavior when FDSN returns HTTP 204 for a requested waveform chunk.
 # Choose "skip" to print a warning and continue, or "fail" to stop immediately.
+
+bad_waveform_behavior = "skip"
+# Behavior when a downloaded waveform cannot be read by ObsPy after all attempts.
+# Choose "skip" to continue with a gap, or "fail" to stop immediately.
 
 msnoise_startdate = ""
 msnoise_enddate = ""
