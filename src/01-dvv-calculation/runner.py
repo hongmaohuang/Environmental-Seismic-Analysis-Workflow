@@ -635,13 +635,22 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
     end_date = str(require_value(msnoise_cfg, "end_date", "dvv_calculation.msnoise"))
     timeout = int(require_value(msnoise_cfg, "download_timeout", "dvv_calculation.msnoise"))
     curl_retries = int(require_value(msnoise_cfg, "curl_retries", "dvv_calculation.msnoise"))
+    curl_retry_delay = int(msnoise_cfg.get("curl_retry_delay", 5))
+    waveform_download_attempts = int(msnoise_cfg.get("waveform_download_attempts", 1))
     chunk_hours = int(require_value(msnoise_cfg, "download_chunk_hours", "dvv_calculation.msnoise"))
     no_data_behavior = str(require_value(msnoise_cfg, "no_data_behavior", "dvv_calculation.msnoise")).lower()
+    bad_waveform_behavior = str(msnoise_cfg.get("bad_waveform_behavior", "skip")).lower()
     skip_existing_downloads = bool(msnoise_cfg.get("skip_existing_downloads", False))
     if no_data_behavior not in {"skip", "fail"}:
         raise ValueError('dvv_calculation.msnoise.no_data_behavior must be "skip" or "fail"')
+    if bad_waveform_behavior not in {"skip", "fail"}:
+        raise ValueError('dvv_calculation.msnoise.bad_waveform_behavior must be "skip" or "fail"')
     if chunk_hours <= 0:
         raise ValueError("dvv_calculation.msnoise.download_chunk_hours must be positive")
+    if curl_retry_delay < 0:
+        raise ValueError("dvv_calculation.msnoise.curl_retry_delay cannot be negative")
+    if waveform_download_attempts <= 0:
+        raise ValueError("dvv_calculation.msnoise.waveform_download_attempts must be positive")
     sds_root = project_dir / SDS_FOLDER
     raw_root = project_dir / RAW_MSEED_FOLDER
     sds_root.mkdir(parents=True, exist_ok=True)
@@ -715,6 +724,9 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 "-sS",
                 "--retry",
                 str(curl_retries),
+                "--retry-delay",
+                str(curl_retry_delay),
+                "--retry-all-errors",
                 "--max-time",
                 str(timeout),
                 "-o",
@@ -723,49 +735,73 @@ def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, l
                 "%{http_code}",
                 query,
             ]
-            print(f"Downloading {target.seed_id} from {target.provider} {chunk_start} to {chunk_end}", flush=True)
-            if part_path.exists():
-                part_path.unlink()
-            result = subprocess.run(command, check=False, capture_output=True, text=True)
-            http_code = result.stdout.strip()
-            if http_code in {"204", "404"} and result.returncode == 0:
-                message = (
-                    f"No waveform data returned for {target.seed_id} "
-                    f"{chunk_start} to {chunk_end} (HTTP {http_code})."
-                )
-                if no_data_behavior == "skip":
-                    print(f"WARNING: {message} Skipping this chunk.", flush=True)
+            stream = None
+            skip_chunk = False
+            for attempt in range(1, waveform_download_attempts + 1):
+                attempt_note = f" attempt {attempt}/{waveform_download_attempts}" if waveform_download_attempts > 1 else ""
+                print(f"Downloading {target.seed_id} from {target.provider} {chunk_start} to {chunk_end}{attempt_note}", flush=True)
+                if part_path.exists():
+                    part_path.unlink()
+                result = subprocess.run(command, check=False, capture_output=True, text=True)
+                http_code = result.stdout.strip()
+                if http_code in {"204", "404"} and result.returncode == 0:
+                    message = (
+                        f"No waveform data returned for {target.seed_id} "
+                        f"{chunk_start} to {chunk_end} (HTTP {http_code})."
+                    )
+                    if no_data_behavior == "skip":
+                        print(f"WARNING: {message} Skipping this chunk.", flush=True)
+                        if part_path.exists():
+                            part_path.unlink()
+                        no_data_by_channel[target.seed_id] += 1
+                        skip_chunk = True
+                        break
+                    raise RuntimeError(message)
+                if result.returncode != 0 or http_code != "200" or not part_path.exists() or part_path.stat().st_size == 0:
+                    message = (
+                        "Waveform download failed: "
+                        f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
+                        f"http={http_code}, returncode={result.returncode}, stderr={result.stderr.strip()}"
+                    )
                     if part_path.exists():
                         part_path.unlink()
-                    no_data_by_channel[target.seed_id] += 1
-                    continue
-                raise RuntimeError(message)
-            if result.returncode != 0 or http_code != "200" or not part_path.exists() or part_path.stat().st_size == 0:
-                failed_by_channel[target.seed_id] += 1
-                print(
-                    "WARNING: Waveform download failed; skipping this chunk. "
-                    f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
-                    f"http={http_code}, returncode={result.returncode}, stderr={result.stderr.strip()}",
-                    flush=True,
-                )
-                if part_path.exists():
-                    part_path.unlink()
-                continue
+                    if attempt < waveform_download_attempts:
+                        print(f"WARNING: {message}. Retrying this chunk.", flush=True)
+                        continue
+                    failed_by_channel[target.seed_id] += 1
+                    if bad_waveform_behavior == "skip":
+                        print(f"WARNING: {message}. Skipping this chunk.", flush=True)
+                        skip_chunk = True
+                        break
+                    raise RuntimeError(message)
 
-            try:
-                stream = obspy.read(str(part_path))
-            except Exception as exc:
-                failed_by_channel[target.seed_id] += 1
-                print(
-                    "WARNING: Downloaded waveform could not be read by ObsPy; "
-                    "skipping this chunk. "
-                    f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
-                    f"path={part_path}, size={part_path.stat().st_size}, error={exc}",
-                    flush=True,
-                )
-                if part_path.exists():
-                    part_path.unlink()
+                try:
+                    stream = obspy.read(str(part_path))
+                    break
+                except Exception as exc:
+                    message = (
+                        "Downloaded waveform could not be read by ObsPy: "
+                        f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}, "
+                        f"path={part_path}, size={part_path.stat().st_size}, error={exc}"
+                    )
+                    if part_path.exists():
+                        part_path.unlink()
+                    if attempt < waveform_download_attempts:
+                        print(f"WARNING: {message}. Retrying this chunk.", flush=True)
+                        continue
+                    failed_by_channel[target.seed_id] += 1
+                    if bad_waveform_behavior == "skip":
+                        print(f"WARNING: {message}. Skipping this chunk.", flush=True)
+                        skip_chunk = True
+                        break
+                    raise RuntimeError(message)
+            if skip_chunk:
                 continue
+            if stream is None:
+                raise RuntimeError(
+                    "Waveform download loop finished without a readable stream: "
+                    f"channel={target.seed_id}, start={chunk_start}, end={chunk_end}"
+                )
             part_path.replace(raw_path)
             _write_msnoise_stream(stream, target, msnoise_cfg, sds_root, target_sampling_rate)
             sds_manifest.add(manifest_key)
