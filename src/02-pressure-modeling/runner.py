@@ -167,6 +167,9 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
         cfg, require_value(pressure_cfg, "atmospheric_pressure_csv_path", "pressure_modeling")
     )
     snow_path = _as_optional_path(cfg, require_configured(pressure_cfg, "snow_csv_path", "pressure_modeling"))
+    thermal_temperature_path = _as_optional_path(
+        cfg, config_value(pressure_cfg, "thermal_temperature_csv_path", "")
+    )
     external_pressure_loading_path = _as_optional_path(
         cfg, config_value(pressure_cfg, "external_pressure_loading_csv_path", "")
     )
@@ -182,6 +185,11 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
         _validate_input_file(
             external_pressure_loading_path,
             "pressure_modeling.external_pressure_loading_csv_path",
+        )
+    if thermal_temperature_path is not None:
+        _validate_input_file(
+            thermal_temperature_path,
+            "pressure_modeling.thermal_temperature_csv_path",
         )
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -230,6 +238,7 @@ def run_pressure_modeling(cfg: dict) -> PressureModelingResult:
         ),
         snow_density_kg_m3=float(require_value(pressure_cfg, "snow_density_kg_m3", "pressure_modeling")),
         external_pressure_loading_csv_path=external_pressure_loading_path,
+        thermal_temperature_csv_path=thermal_temperature_path,
     )
 
     result = PressureModelingResult(

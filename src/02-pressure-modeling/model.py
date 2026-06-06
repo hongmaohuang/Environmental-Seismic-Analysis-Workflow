@@ -29,6 +29,21 @@ def read_groundwater(filepath):
         .sort_index()
     )
 
+def read_temperature(filepath):
+    """
+    Read an optional thermal forcing input with columns:
+    time, temperature
+    """
+    df = pd.read_csv(filepath, usecols=["time", "temperature"])
+    df["time"] = pd.to_datetime(df["time"])
+    df["temperature"] = pd.to_numeric(df["temperature"], errors="coerce")
+    return (
+        df.rename(columns={"temperature": "thermal_temp_c"})
+        .dropna(subset=["thermal_temp_c"])
+        .set_index("time")
+        .sort_index()
+    )
+
 def read_atmospheric_pressure(filepath):
     """
     Read the atmospheric pressure input with columns:
@@ -451,6 +466,7 @@ def run_pore_pressure_workflow(
     incompetent_layer_thickness_m,
     snow_density_kg_m3,
     external_pressure_loading_csv_path=None,
+    thermal_temperature_csv_path=None,
 ):
     """
     Run the functions above all together to get the result
@@ -473,14 +489,23 @@ def run_pore_pressure_workflow(
         filepath=gwl_csv_path,
     )
     _, dt_s = infer_regular_dt_seconds(model_index)
+    if thermal_temperature_csv_path not in (None, ""):
+        thermal_temperature = read_temperature(thermal_temperature_csv_path)
+        thermal_temperature_source = thermal_temperature[["thermal_temp_c"]]
+        thermal_temperature_dataset_name = "thermal temperature"
+        thermal_temperature_filepath = thermal_temperature_csv_path
+    else:
+        thermal_temperature_source = gwl[["well_temp_c"]]
+        thermal_temperature_dataset_name = "well temperature"
+        thermal_temperature_filepath = gwl_csv_path
     temp_rs = prepare_time_series(
-        gwl[["well_temp_c"]],
+        thermal_temperature_source,
         start=start,
         end=end,
         rule=resample_rule,
         target_index=model_index,
-        dataset_name="well temperature",
-        filepath=gwl_csv_path,
+        dataset_name=thermal_temperature_dataset_name,
+        filepath=thermal_temperature_filepath,
     )
 
     # the gwl data aligns with the final temporal resolution (defined by users from RULE)
@@ -576,7 +601,9 @@ def run_pore_pressure_workflow(
 
     out = pd.DataFrame(index=model_index)
     out["gwl_m_asl"] = gwl_rs.values
-    out["well_temp_c"] = temp_rs.values
+    out["thermal_temp_c"] = temp_rs.values
+    if thermal_temperature_csv_path in (None, ""):
+        out["well_temp_c"] = temp_rs.values
     out["patm_pa"] = patm_rs.values
     if snow_rs is not None:
         out["snow_depth_m"] = snow_rs.values
@@ -603,8 +630,11 @@ def run_pore_pressure_workflow(
         )
     first_depth_m = depths_m[0]
     thermoelastic = thermoelastic_by_depth[first_depth_m]
-    out["well_temp_annual_c"] = thermoelastic["temperature_annual_c"].values
-    out["well_temp_residual_c"] = out["well_temp_c"] - out["well_temp_annual_c"]
+    out["thermal_temp_annual_c"] = thermoelastic["temperature_annual_c"].values
+    out["thermal_temp_residual_c"] = out["thermal_temp_c"] - out["thermal_temp_annual_c"]
+    if "well_temp_c" in out.columns:
+        out["well_temp_annual_c"] = out["thermal_temp_annual_c"]
+        out["well_temp_residual_c"] = out["thermal_temp_residual_c"]
     for depth_m, thermoelastic in thermoelastic_by_depth.items():
         label = depth_label(depth_m)
         out[f"dvv_vsv_thermoelastic_annual_{label}"] = (
