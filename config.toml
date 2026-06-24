@@ -20,12 +20,21 @@ run_commands = true
 # true means actually call the MSNoise commands below.
 
 prepare_project = true
-# true means this runner will download waveform data, initialize msnoise.sqlite,
-# scan SDS files, and write station/filter/config entries before MSNoise commands.
+# true means this runner will initialize msnoise.sqlite, scan SDS files, and
+# write station/filter/config entries before MSNoise commands.
+# If use_existing_sds is false, it also downloads waveform data.
 # false means the fixed MSNoise project folder already contains a prepared project.
-reset_project_dir = true
+
+use_existing_sds = true
+# true means use the existing SDS archive in the project folder and skip FDSN
+# waveform discovery/download entirely. Station/channel rows are derived from
+# the SDS filenames, then msnoise scan_archive is run on that SDS tree.
+
+reset_project_dir = false
 # Only used when prepare_project is true.
 # true deletes the fixed MSNoise project folder before rebuilding it.
+# Must be false when use_existing_sds is true, otherwise existing SDS hardlinks
+# would be deleted.
 
 clear_jobs_on_run = true
 # true clears existing MSNoise jobs before recreating them.
@@ -58,7 +67,7 @@ geographic_bounds = { minlatitude = 63.8023, maxlatitude = 63.8968, minlongitude
 # User-facing station search area used when prepare_project is true.
 # The runner discovers matching stations from the FDSN station service.
 
-channels = "*Z"
+channels = "EH?,HH?"
 # Default FDSN channel selector used when prepare_project is true.
 # You can use "BHZ,HHZ", "BH?,HH?", "*Z" or similar to specify multiple channels.
 # If you are using DAS datasets, you should look up the channel code.
@@ -121,14 +130,14 @@ ref_end = "2021-05-14"
 # Leave blank to use the MSNoise processing date range.
 # Please note that MSNoise only except YYYY-MM-DD format for ref_begin/ref_end, so the time portion is ignored and the reference period always starts at 00:00:00.
 
-autocorr = "N"
+autocorr = "Y"
 # Required for single-station runs discovered from a small geographic area.
 
-components_to_compute = "ZZ"
+components_to_compute = "ZZ,NN,EE"
 # Cross-station components to compute.
 # If you are using DAS datasets, you should look up the channel code.
 
-components_to_compute_single_station = "ZZ"
+components_to_compute_single_station = "ZZ,NN,EE"
 # Single-station components to compute.
 # If you are using DAS datasets, you should look up the channel code.
 

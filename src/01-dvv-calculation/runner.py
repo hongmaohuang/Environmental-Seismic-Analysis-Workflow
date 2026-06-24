@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import fnmatch
 import json
 import shutil
 import sqlite3
@@ -222,6 +223,23 @@ def _as_dataselect_location(location: str) -> str:
 
 def _location_selector(msnoise_cfg: dict) -> str:
     return str(msnoise_cfg.get("location") or "*")
+
+
+def _selector_values(selector: object) -> list[str]:
+    return [item.strip() for item in str(selector or "*").split(",") if item.strip()]
+
+
+def _channel_matches_selector(channel: str, selector: object) -> bool:
+    values = _selector_values(selector)
+    return any(fnmatch.fnmatchcase(channel.upper(), value.upper()) for value in values)
+
+
+def _location_matches_selector(location: str, selector: object) -> bool:
+    values = _selector_values(selector)
+    if "*" in values:
+        return True
+    normalized_location = location or "--"
+    return any(value in {location, normalized_location} for value in values)
 
 
 def _msnoise_station_name(target: ChannelTarget, msnoise_cfg: dict) -> str:
@@ -561,12 +579,44 @@ def _write_msnoise_stream(stream, target: ChannelTarget, msnoise_cfg: dict, sds_
         _write_sds_trace(trace, sds_root, target_sampling_rate)
 
 
-def _normalize_existing_sds_files(sds_root: Path, target_sampling_rate: float) -> None:
+def _parse_sds_filename(file_path: Path) -> dict[str, str] | None:
+    parts = file_path.name.split(".")
+    if len(parts) != 7:
+        return None
+    net, sta, loc, cha, data_type, year, julian_day = parts
+    if data_type != "D" or not year.isdigit() or not julian_day.isdigit():
+        return None
+    return {
+        "network": net,
+        "station": sta,
+        "location": loc,
+        "channel": cha,
+        "year": year,
+        "julian_day": julian_day,
+    }
+
+
+def _sds_file_matches_config(file_path: Path, msnoise_cfg: dict) -> bool:
+    parsed = _parse_sds_filename(file_path)
+    if not parsed:
+        return False
+    data_type = str(msnoise_cfg.get("data_type") or "D")
+    if f".{data_type}." not in file_path.name:
+        return False
+    return (
+        _channel_matches_selector(parsed["channel"], msnoise_cfg.get("channels", "*"))
+        and _location_matches_selector(parsed["location"], msnoise_cfg.get("location", "*"))
+    )
+
+
+def _normalize_existing_sds_files(sds_root: Path, target_sampling_rate: float, msnoise_cfg: dict | None = None) -> None:
     from obspy import read
 
     repaired = 0
     for file_path in sorted(sds_root.rglob("*")):
         if not file_path.is_file():
+            continue
+        if msnoise_cfg is not None and not _sds_file_matches_config(file_path, msnoise_cfg):
             continue
         stream = read(str(file_path))
         original_rates = [float(trace.stats.sampling_rate) for trace in stream]
@@ -626,6 +676,91 @@ def _write_channel_metadata(project_dir: Path, targets: list[ChannelTarget], msn
                     "endtime": target.endtime,
                 }
             )
+
+
+def _existing_sds_channel_targets(msnoise_cfg: dict, project_dir: Path) -> list[ChannelTarget]:
+    sds_root = project_dir / SDS_FOLDER
+    if not sds_root.exists():
+        raise FileNotFoundError(f"Existing SDS directory does not exist: {sds_root}")
+
+    by_seed: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for file_path in sorted(sds_root.rglob("*")):
+        if not file_path.is_file() or not _sds_file_matches_config(file_path, msnoise_cfg):
+            continue
+        parsed = _parse_sds_filename(file_path)
+        if not parsed:
+            continue
+        key = (parsed["network"], parsed["station"], parsed["location"], parsed["channel"])
+        year = int(parsed["year"])
+        julian_day = int(parsed["julian_day"])
+        try:
+            day = datetime.strptime(f"{year} {julian_day:03d}", "%Y %j").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        start = _format_time(day)
+        end = _format_time(day + timedelta(days=1))
+        if key not in by_seed:
+            by_seed[key] = {
+                "starttime": start,
+                "endtime": end,
+                "files": 1,
+            }
+            continue
+        by_seed[key]["starttime"] = min(str(by_seed[key]["starttime"]), start)
+        by_seed[key]["endtime"] = max(str(by_seed[key]["endtime"]), end)
+        by_seed[key]["files"] = int(by_seed[key]["files"]) + 1
+
+    targets = [
+        ChannelTarget(
+            provider="existing_sds",
+            station_url="",
+            dataselect_url="",
+            network=net,
+            station=sta,
+            location=loc,
+            channel=cha,
+            latitude=0.0,
+            longitude=0.0,
+            elevation=0.0,
+            sample_rate=0.0,
+            starttime=str(metadata["starttime"]),
+            endtime=str(metadata["endtime"]),
+        )
+        for (net, sta, loc, cha), metadata in sorted(by_seed.items())
+    ]
+    if not targets:
+        raise RuntimeError(
+            "No existing SDS files matched the configured selectors. "
+            f"SDS root={sds_root}, channels={msnoise_cfg.get('channels')}, location={msnoise_cfg.get('location')}"
+        )
+    return targets
+
+
+def _station_rows_from_targets(targets: list[ChannelTarget], msnoise_cfg: dict) -> list[dict[str, object]]:
+    station_rows: dict[tuple[str, str], dict[str, object]] = {}
+    for target in targets:
+        msnoise_station = _msnoise_station_name(target, msnoise_cfg)
+        station_rows[(target.network, msnoise_station)] = {
+            "net": target.network,
+            "sta": msnoise_station,
+            "lon": target.longitude,
+            "lat": target.latitude,
+            "elev": target.elevation,
+        }
+    return [station_rows[key] for key in sorted(station_rows)]
+
+
+def _prepare_existing_sds_project(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
+    sds_root = project_dir / SDS_FOLDER
+    targets = _existing_sds_channel_targets(msnoise_cfg, project_dir)
+    _write_channel_metadata(project_dir, targets, msnoise_cfg)
+    station_rows = _station_rows_from_targets(targets, msnoise_cfg)
+
+    print("Using existing SDS archive; waveform download is disabled.", flush=True)
+    print(f"Existing SDS channel(s) admitted: {len(targets)}", flush=True)
+    print(f"Existing SDS station(s) admitted: {len(station_rows)}", flush=True)
+    print("WARNING: Existing-SDS mode derives station coordinates from SDS filenames only; coordinates are set to 0.0.", flush=True)
+    return sds_root, station_rows
 
 
 def _download_msnoise_sds(msnoise_cfg: dict, project_dir: Path) -> tuple[Path, list[dict[str, object]]]:
@@ -1010,7 +1145,7 @@ def _run_msnoise_scan_archive(project_dir: Path, sds_root: Path) -> None:
 
 
 def _scan_msnoise_project(msnoise_cfg: dict, project_dir: Path, sds_root: Path, station_rows: list[dict[str, object]]) -> None:
-    _normalize_existing_sds_files(sds_root, _target_sampling_rate(msnoise_cfg))
+    _normalize_existing_sds_files(sds_root, _target_sampling_rate(msnoise_cfg), msnoise_cfg)
     _write_msnoise_station_table(msnoise_cfg, project_dir, station_rows)
     _clear_msnoise_data_availability(project_dir)
     _run_msnoise_scan_archive(project_dir, sds_root)
@@ -1020,11 +1155,18 @@ def run_msnoise_project_setup(msnoise_cfg: dict, project_dir: Path) -> None:
     if not require_bool(msnoise_cfg, "prepare_project", "dvv_calculation.msnoise"):
         return
 
+    use_existing_sds = bool(msnoise_cfg.get("use_existing_sds", False))
+    if use_existing_sds and require_bool(msnoise_cfg, "reset_project_dir", "dvv_calculation.msnoise"):
+        raise ValueError("dvv_calculation.msnoise.reset_project_dir must be false when use_existing_sds is true")
+
     if require_bool(msnoise_cfg, "reset_project_dir", "dvv_calculation.msnoise") and project_dir.exists():
         shutil.rmtree(project_dir)
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    sds_root, station_rows = _download_msnoise_sds(msnoise_cfg, project_dir)
+    if use_existing_sds:
+        sds_root, station_rows = _prepare_existing_sds_project(msnoise_cfg, project_dir)
+    else:
+        sds_root, station_rows = _download_msnoise_sds(msnoise_cfg, project_dir)
     if not (project_dir / "msnoise.sqlite").exists():
         subprocess.run(["msnoise", "db", "init", "--tech", MSNOISE_DB_TECH], cwd=project_dir, check=True)
     _scan_msnoise_project(msnoise_cfg, project_dir, sds_root, station_rows)
